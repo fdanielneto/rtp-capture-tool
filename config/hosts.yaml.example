@@ -1,0 +1,44 @@
+rpcap:
+  default_port: 2002
+  auth_mode: null
+
+settings:
+  default_capture_root: /absolute/path/for/captures
+
+environments:
+  PRD:
+    regions:
+      EU:
+        sub-region:
+          eu-west-1:
+            hosts:
+              - id: prd-eu-west-1-rtp-1
+                address: 10.0.10.11
+                description: PRD EU West 1 media node 1
+                interfaces: ["ens5"]
+              - id: prd-eu-west-1-rtp-2
+                address: 10.0.10.12
+                description: PRD EU West 1 media node 2
+                interfaces: ["ens5"]
+      US:
+        sub-region:
+          us-east-1:
+            hosts:
+              - id: prd-us-east-1-rtp-1
+                address: 10.0.20.11
+                description: PRD US East 1 media node 1
+                interfaces: ["ens5"]
+
+  QA:
+    regions:
+      EU:
+        sub-region:
+          eu-west-1:
+            hosts:
+              - id: qa-eu-west-1-rtp-1
+                address: 10.1.10.11
+                description: QA EU West 1 media node 1
+                interfaces: ["ens5"]
+
+  STG:
+    regions: {}

@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RTP Remote Capture Decryptor</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body
+    data-project-log-level="{{ log_level }}"
+    data-capture-root="{{ capture_root }}"
+    data-s3-enabled="{{ 1 if s3_enabled else 0 }}"
+    data-s3-configured="{{ 1 if s3_configured else 0 }}"
+    data-s3-spool-default="{{ s3_spool_default }}"
+  >
+    <main class="container">
+      <header class="topbar">
+        <div>
+          <h1>RTP Capture Assistant</h1>
+          <p class="subtitle">Capture RTP/SRTP from rpcapd hosts and correlate/decrypt media from SIP pcap.</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="homepageBtn" class="log-action-btn" type="button">Homepage</button>
+          <button id="showLogsToggle" class="log-action-btn" type="button">Show Logs</button>
+        </div>
+      </header>
+
+      <section class="panel" id="homePanel">
+        <h2>Choose Action</h2>
+        <div class="home-actions">
+          <div class="home-action-card">
+            <button id="captureModeBtn" type="button">🎙️ Start Media Capture</button>
+            <p class="home-action-desc">
+              Enables RTP/SRTP capture. Use this option to start a new real-time media capture session. Supports SIP flow
+              pcap upload and correlates the SIP flow with captured media.
+            </p>
+          </div>
+          <div class="home-action-card">
+            <button id="processBtn" type="button">🧩 Process Call</button>
+            <p class="home-action-desc">
+              Correlates a SIP flow with previously captured media. Requires upload of RTP files and the pcap file containing
+              the call SIP flow.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="captureLocationPanel" hidden>
+        <h2>Capture files location</h2>
+        <div class="location-choice-group">
+          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationLocal" value="local" /> Local</label>
+          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationS3" value="s3" checked /> AWS S3</label>
+        </div>
+        <div id="captureLocationDisclaimer" class="help capture-location-warning"></div>
+        <div id="s3SpoolDirPanel" hidden>
+          <label for="chooseS3SpoolDirBtn">Local directory used before S3 flush (optional)</label>
+          <div class="help s3-spool-help">
+            If no directory is selected, the default spool directory is used.
+          </div>
+          <div class="s3-spool-picker-row">
+            <button id="chooseS3SpoolDirBtn" type="button" class="selection-chip">Choose folder</button>
+          </div>
+        </div>
+        <div class="buttons">
+          <button id="captureLocationContinueBtn" type="button">Continue</button>
+          <button id="captureLocationBackBtn" type="button" class="secondary">Back</button>
+        </div>
+      </section>
+
+      <section class="panel" id="environmentPanel" hidden>
+        <h2>🧭 Environment</h2>
+        <select id="environment" aria-label="Environment">
+          <option value="">Select environment...</option>
+          {% for env in environments %}
+          <option value="{{ env }}">{{ env }}</option>
+          {% endfor %}
+        </select>
+      </section>
+
+      <section class="panel" id="captureFlowPanel" hidden>
+        <h2>🗺️ Region</h2>
+        <select id="region" aria-label="Region" class="region-select">
+          <option value="">Select region...</option>
+        </select>
+        <div id="regionStatus" class="help"></div>
+      </section>
+
+      <section class="panel" id="subRegionPanel" hidden>
+        <h2>📍 Sub-region</h2>
+        <div class="help">Select one or more sub-regions. If none are selected, capture runs on all sub-regions.</div>
+        <select id="subRegion" aria-label="Sub-region" multiple size="1"></select>
+        <div id="subRegionChips" class="chip-box" aria-label="Sub-region options"></div>
+        <div class="subregion-footer">
+          <div id="subRegionStatus" class="help"></div>
+          <div class="host-actions">
+            <label class="checkbox-inline"><input id="allSubRegionsToggle" type="checkbox" checked /> all</label>
+            <button id="cleanSubRegionsBtn" type="button" class="selection-chip">Clean</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="noReachablePanel" hidden>
+        <h2>⚠️⚠️⚠️ RTPEngine Host Unreachable – Connectivity Issue ⚠️⚠️⚠️</h2>
+        <div id="noReachableMessage" class="status error no-reachable-message"></div>
+        <div class="help no-reachable-help">Please verify the following before retrying:</div>
+        <ul class="no-reachable-list">
+          <li>Zscaler is disabled/closed.</li>
+          <li>VPN is active.</li>
+        </ul>
+        <div class="no-reachable-footer">
+          <div class="help" id="noReachableAutoInfo">Automatic reachability test runs every 3 minutes.</div>
+          <div class="no-reachable-actions">
+            <button id="retryReachabilityBtn" type="button" class="selection-chip">Retry reachability</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="captureRecoveryPanel" hidden>
+        <h2>🔄 Connectivity Recovery</h2>
+        <div class="capture-recovery-line">
+          <span class="capture-recovery-spinner" aria-hidden="true"></span>
+          <span id="captureRecoveryCountdown">Attempting automatic reconnect in 60s</span>
+        </div>
+        <div class="capture-recovery-track">
+          <div id="captureRecoveryProgress" class="capture-recovery-progress"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="hostPanel" hidden>
+        <h2>🖥️ Hosts</h2>
+        <div id="hostHelp" class="help">Select one or more hosts. If none are selected, capture runs on all reachable hosts.</div>
+        <select id="host" multiple size="1" aria-label="Hosts" aria-describedby="hostHelp"></select>
+        <div id="hostChips" class="chip-box" aria-label="Host options"></div>
+        <div class="host-actions">
+          <label class="checkbox-inline"><input id="allHostsToggle" type="checkbox" checked /> all</label>
+          <button id="cleanSelectionBtn" type="button" class="selection-chip">Clean</button>
+        </div>
+
+        <label for="filter">Capture filter</label>
+        <input id="filter" type="text" placeholder="example: udp or host 10.1.2.3" />
+
+        <div class="inline-input-row">
+          <div class="inline-input-col">
+            <label for="outputDirName">Output folder name (optional)</label>
+            <input id="outputDirName" type="text" placeholder="example: ticket-12345" />
+          </div>
+          <div class="inline-input-col inline-input-timeout">
+            <label for="timeoutMinutes">Timeout (optional)</label>
+            <input id="timeoutMinutes" type="number" min="1" step="1" placeholder="example: 30 (minutes)" />
+          </div>
+        </div>
+        <div class="inline-help-row">
+          <div class="help" id="captureStorageHint">Files are stored under {{ capture_root }}/&lt;name&gt;/&lt;timestamp&gt;/...</div>
+          <div class="help help-timeout">Timeout value in minutes</div>
+        </div>
+
+        <div class="buttons">
+          <button id="startBtn">▶️ Start Capture</button>
+          <button id="stopBtn" disabled>⏹ Stop Capture</button>
+          <button id="cleanBtn" type="button">🧽 Clean Filters</button>
+        </div>
+        <div id="criticalStatus" class="status status-critical" hidden></div>
+        <div id="status" class="status">Select a region to continue.</div>
+      </section>
+
+      <section class="panel" id="livePanel" hidden>
+        <h2>Live Capture Details</h2>
+        <div id="counter" class="counter"></div>
+      </section>
+
+      <input id="mediaDirPicker" type="file" webkitdirectory directory multiple hidden />
+
+      <section class="panel" id="postSection" hidden>
+        <h3>Correlate Call (SIP -> RTP/SRTP)</h3>
+        <div id="mediaSourcePanel" class="s3-import-panel">
+          <label>Media source</label>
+          <div class="s3-import-row">
+            <button id="chooseLocalMediaBtn" type="button" class="selection-chip">Choose local directory</button>
+            <button id="showS3MediaBtn" type="button" class="selection-chip">Use S3 session</button>
+          </div>
+          <div id="mediaSourceStatus" class="help">Choose where media files should be loaded from.</div>
+        </div>
+        <div id="s3ImportPanel" class="s3-import-panel" hidden>
+          <label for="s3SessionSelect">S3 media session (optional)</label>
+          <div class="s3-import-row">
+            <select id="s3SessionSelect">
+              <option value="">Select S3 session...</option>
+            </select>
+            <button id="refreshS3SessionsBtn" type="button" class="selection-chip">Refresh</button>
+            <button id="importS3SessionBtn" type="button" class="selection-chip">Import from S3</button>
+          </div>
+          <div id="s3ImportStatus" class="help"></div>
+        </div>
+        <label for="sipPcap">SIP pcap file</label>
+        <input id="sipPcap" type="file" accept=".pcap,.pcapng" />
+        <label for="callDirection">Call direction</label>
+        <select id="callDirection" required>
+          <option value="">Select direction...</option>
+          <option value="inbound">Inbound</option>
+          <option value="outbound">Outbound</option>
+        </select>
+
+        <div class="buttons correlate-actions">
+          <button id="correlateBtn" type="button" disabled>⚡ Run Correlation</button>
+          <button id="restartCaptureBtn" type="button">🔁 Restart Capture</button>
+        </div>
+        <div id="s3FlushNotice" class="s3-flush-notice" hidden>
+          <span class="correlate-spinner" aria-hidden="true"></span>
+          <span id="s3FlushNoticeText">Writing media files to S3 bucket. Correlation will be enabled when upload completes.</span>
+          <div class="s3-flush-actions">
+            <button id="stopFlushBtn" type="button" class="selection-chip">Stop flush</button>
+            <button id="resumeFlushBtn" type="button" class="selection-chip">Resume session flush</button>
+          </div>
+        </div>
+        <div id="correlateProgress" class="correlate-progress" hidden>
+          <span class="correlate-spinner" aria-hidden="true"></span>
+          <span>Correlating SIP &amp; RTP...</span>
+          <button id="cancelCorrelationBtn" type="button" class="selection-chip">Cancel correlation</button>
+        </div>
+        <div id="finalResults" hidden></div>
+        <div id="rawFiles"></div>
+      </section>
+
+      <section class="panel" id="logSection">
+        <div class="log-header">
+          <h2>Logs</h2>
+          <div class="log-controls" aria-label="Log controls">
+            <label for="turnOffStatusCheck" class="log-label">Turn off live logs</label>
+            <input id="turnOffStatusCheck" type="checkbox" checked />
+            <button id="downloadLogBtn" type="button">Download logs</button>
+            <button id="clearLogBtn" type="button">Clear</button>
+          </div>
+        </div>
+        <pre id="appLog" class="log"></pre>
+        <div class="help">Use Debug level for HTTP requests, filters, and step-by-step correlation details.</div>
+      </section>
+    </main>
+
+    <div id="captureLeaveModal" class="capture-leave-modal-backdrop" hidden>
+      <div class="capture-leave-modal">
+        <h3>Leave Capture Flow?</h3>
+        <p>An active capture is running. If you continue, the capture will be cancelled.</p>
+        <div class="capture-leave-actions">
+          <button id="stayOnCaptureBtn" type="button">Stay</button>
+          <button id="leaveAndCancelBtn" type="button">Leave and cancel capture</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

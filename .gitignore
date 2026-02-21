@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local outputs
+captures/
+e2e-tests/
+logs/
+output/
+build/
+mockup*
+
+# Local config
+config/
+
+# Packaging artifacts
+*.egg-info/
+dist/
+wheelhouse/
+
+# macOS
+.DS_Store

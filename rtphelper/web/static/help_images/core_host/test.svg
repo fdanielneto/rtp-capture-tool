@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#f5f9ff"/>
+  <text x="24" y="44" font-family="Arial, sans-serif" font-size="22" fill="#123">core -> host</text>
+  <text x="24" y="78" font-family="Arial, sans-serif" font-size="16" fill="#345">Test help image placeholder</text>
+  <rect x="24" y="110" width="592" height="210" rx="8" fill="#fff" stroke="#aac2e6"/>
+  <text x="40" y="146" font-family="Arial, sans-serif" font-size="14" fill="#234">Use RTP IP/port from 200 OK to Twilio INVITE.</text>
+</svg>
