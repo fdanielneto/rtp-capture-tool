@@ -15,6 +15,16 @@ from rtphelper.size_parser import parse_size_bytes
 LOGGER = logging.getLogger(__name__)
 
 
+def _parse_size_bytes_env(env_var: str, default: int) -> int:
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        return default
+    parsed = parse_size_bytes(raw, -1)
+    if parsed <= 0:
+        raise ValueError(f"Invalid size value for {env_var}: {raw}")
+    return parsed
+
+
 def _normalize_endpoint(value: str) -> str:
     endpoint = (value or "").strip()
     if not endpoint:
@@ -87,17 +97,11 @@ class S3CaptureStorage:
         )
         self._multipart_threshold = max(
             5 * 1024 * 1024,
-            parse_size_bytes(
-                os.environ.get("RTPHELPER_S3_MULTIPART_THRESHOLD_BYTES", "200MB"),
-                200 * 1000 * 1000,
-            ),
+            _parse_size_bytes_env("RTPHELPER_S3_MULTIPART_THRESHOLD_BYTES", 200 * 1000 * 1000),
         )
         self._multipart_chunksize = max(
             5 * 1024 * 1024,
-            parse_size_bytes(
-                os.environ.get("RTPHELPER_S3_MULTIPART_CHUNKSIZE_BYTES", "100MB"),
-                100 * 1000 * 1000,
-            ),
+            _parse_size_bytes_env("RTPHELPER_S3_MULTIPART_CHUNKSIZE_BYTES", 100 * 1000 * 1000),
         )
         self._multipart_max_concurrency = max(
             1, int(os.environ.get("RTPHELPER_S3_MULTIPART_MAX_CONCURRENCY", "10") or "10")
