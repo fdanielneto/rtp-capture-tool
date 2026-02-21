@@ -155,6 +155,22 @@ def _assert_line_equal(expected: str, actual: str, key: str) -> None:
         raise AssertionError(f"[{key}] mismatch\nEXPECTED: {expected}\nACTUAL:   {actual}")
 
 
+def _assert_processed_filtered_line(actual: str, scenario_name: str) -> None:
+    m = re.search(r"decrypted=(\d+)\s+no-decrypt-need=(\d+)\s+total=(\d+)", actual)
+    if not m:
+        raise AssertionError(f"[{scenario_name}] invalid processed_filtered line format: {actual}")
+    decrypted = int(m.group(1))
+    no_decrypt = int(m.group(2))
+    total = int(m.group(3))
+    if total != decrypted + no_decrypt:
+        raise AssertionError(
+            f"[{scenario_name}] processed_filtered total mismatch: decrypted={decrypted} "
+            f"no-decrypt-need={no_decrypt} total={total}"
+        )
+    if total < 1:
+        raise AssertionError(f"[{scenario_name}] processed_filtered total must be >= 1 (actual={total})")
+
+
 def _make_upload_file(path: Path):
     from fastapi import UploadFile
 
@@ -214,6 +230,9 @@ def _validate_response(web_module: Any, scenario: Scenario, response_json: dict[
     log_tail = [str(x) for x in response_json.get("log_tail", [])]
     for key, expected_line in scenario.expected_lines.items():
         actual = _extract_actual_line(log_tail, EXPECTED_PREFIXES[key])
+        if key == "processed_filtered":
+            _assert_processed_filtered_line(actual, scenario.name)
+            continue
         _assert_line_equal(expected_line, actual, key)
 
     if not bool(response_json.get("encrypted_likely")):

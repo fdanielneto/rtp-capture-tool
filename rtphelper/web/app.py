@@ -8,7 +8,7 @@ import io
 import datetime as dt
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import re
 import shutil
 import shlex
@@ -1483,17 +1483,19 @@ async def correlate(
     for line in endpoint_debug:
         log_lines.append(f"INFO: {line}")
 
-    # Run tshark filter scan for each leg against each raw pcap file.
-    log_lines.append("== Step 3: Apply RTP filters with tshark (per leg, per file) ==")
+    # Run a single tshark scan per media file using one OR-combined filter from all available legs.
+    log_lines.append("== Step 3: Apply RTP filters with tshark (single OR pass per file) ==")
     media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, log_lines)
     log_lines.append(f"INFO: Media capture files available: {len(media_pcaps)}")
-    log_lines.append("INFO: Each step applies its filter against all media capture files (one filter at a time).")
+    log_lines.append("INFO: All available leg filters are combined with OR and applied once per media capture file.")
 
     step_results: List[Dict[str, object]] = []
     combined_dir = session.base_dir / "combined"
     filtered_dir = combined_dir / "filtered"
     filtered_dir.mkdir(parents=True, exist_ok=True)
     filtered_files: List[Path] = []
+
+    available_filters: List[Tuple[int, str, str]] = []
 
     for step in steps:
         step_num = int(step["step"])
@@ -1516,64 +1518,85 @@ async def correlate(
             )
             continue
 
-        log_lines.append(f"Step {step_num} ({leg_key}):")
-        log_lines.append(f"  Filter: {filter_expr}")
+        available_filters.append((step_num, leg_key, filter_expr))
+
+    combined_filter = " || ".join(f"({filter_expr})" for _, _, filter_expr in available_filters)
+    combined_filtered_count = 0
+
+    if available_filters:
+        log_lines.append(
+            "Step 3 (combined OR): using filters from available legs -> "
+            + ", ".join(f"step={step_num}:{leg_key}" for step_num, leg_key, _ in available_filters)
+        )
+        log_lines.append(f"  Combined filter: {combined_filter}")
         LOGGER.info(
-            "Applying leg filter step=%s leg=%s filter=%s",
-            step_num,
-            leg_key,
-            filter_expr,
+            "Applying combined leg filter mode=single_or legs=%s filter=%s",
+            [leg_key for _, leg_key, _ in available_filters],
+            combined_filter,
             extra={"category": "RTP_SEARCH", "correlation_id": call_cid},
         )
-        leg_filtered_count = 0
-        for pcap_idx, pcap_file in enumerate(media_pcaps, start=1):
-            leg_token = str(leg_key or "").replace("leg_", "")
-            try:
-                log_lines.append(
-                    f"  Scan start: step={step_num} leg={leg_key} file={pcap_idx}/{len(media_pcaps)} name={pcap_file.name}"
-                )
-                pkt_count = _run_with_heartbeat(
-                    run=lambda: _tshark_count_matches(pcap_file, filter_expr, call_cid),
-                    heartbeat_message=lambda elapsed_s: (
-                        "INFO: tshark count in progress "
-                        f"step={step_num} leg={leg_key} file={pcap_idx}/{len(media_pcaps)} "
-                        f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
-                    ),
-                )
-            except RuntimeError as exc:
-                log_lines.append(f"  ERROR: {pcap_file.name} count failed: {exc}")
-                continue
-            keep = pkt_count > 10
-            log_lines.append(f"  File: {pcap_file.name} -> packets={pkt_count} {'KEEP' if keep else 'SKIP'}")
-            if keep:
-                log_lines.append(f"{leg_token} stream found in file {pcap_file.name} (packets={pkt_count})")
-            if keep:
-                out = filtered_dir / f"{leg_key}-{pcap_file.stem}-filtered.pcap"
-                try:
-                    _run_with_heartbeat(
-                        run=lambda: _tshark_write_filtered(pcap_file, filter_expr, out, call_cid),
-                        heartbeat_message=lambda elapsed_s: (
-                            "INFO: tshark write in progress "
-                            f"step={step_num} leg={leg_key} file={pcap_idx}/{len(media_pcaps)} "
-                            f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
-                        ),
-                    )
-                    filtered_files.append(out)
-                    leg_filtered_count += 1
-                except RuntimeError as exc:
-                    log_lines.append(f"  ERROR: could not create filtered file for {pcap_file.name}: {exc}")
 
-        step_results.append(
-            {
-                "step": step_num,
-                "leg_key": leg_key,
-                "available": True,
-                "reason": None,
-                "filter": filter_expr,
-                "files_checked": len(media_pcaps),
-                "files_filtered": leg_filtered_count,
-            }
-        )
+    for pcap_idx, pcap_file in enumerate(media_pcaps, start=1):
+        if not combined_filter:
+            break
+
+        try:
+            log_lines.append(
+                f"  Scan start: mode=single_or file={pcap_idx}/{len(media_pcaps)} name={pcap_file.name}"
+            )
+            pkt_count = _run_with_heartbeat(
+                run=lambda: _tshark_count_matches(pcap_file, combined_filter, call_cid),
+                heartbeat_message=lambda elapsed_s: (
+                    "INFO: tshark count in progress "
+                    f"mode=single_or file={pcap_idx}/{len(media_pcaps)} "
+                    f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
+                ),
+            )
+        except RuntimeError as exc:
+            log_lines.append(f"  ERROR: {pcap_file.name} count failed: {exc}")
+            continue
+
+        keep = pkt_count > 10
+        log_lines.append(f"  File: {pcap_file.name} -> packets={pkt_count} {'KEEP' if keep else 'SKIP'}")
+        if not keep:
+            continue
+
+        out = filtered_dir / f"combined-or-{pcap_file.stem}-filtered.pcap"
+        try:
+            _run_with_heartbeat(
+                run=lambda: _tshark_write_filtered(pcap_file, combined_filter, out, call_cid),
+                heartbeat_message=lambda elapsed_s: (
+                    "INFO: tshark write in progress "
+                    f"mode=single_or file={pcap_idx}/{len(media_pcaps)} "
+                    f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
+                ),
+            )
+            filtered_files.append(out)
+            combined_filtered_count += 1
+            log_lines.append(f"combined stream found in file {pcap_file.name} (packets={pkt_count})")
+        except RuntimeError as exc:
+            log_lines.append(f"  ERROR: could not create filtered file for {pcap_file.name}: {exc}")
+
+    for step in steps:
+        step_num = int(step["step"])
+        leg_key = str(step["leg_key"])
+        available = bool(step["available"])
+        filter_expr = str(step.get("tshark_filter") or "")
+        if available and filter_expr:
+            step_results.append(
+                {
+                    "step": step_num,
+                    "leg_key": leg_key,
+                    "available": True,
+                    "reason": None,
+                    "filter": filter_expr,
+                    "files_checked": len(media_pcaps),
+                    "files_filtered": combined_filtered_count,
+                    "execution_mode": "single_or",
+                }
+            )
+
+    step_results.sort(key=lambda item: int(item.get("step", 0)))
 
     if not filtered_files:
         log_lines.append("ERROR: No filtered RTP files were created (threshold > 10 not met).")

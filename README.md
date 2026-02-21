@@ -322,10 +322,10 @@ After SIP upload and direction selection:
 2. Resolve media request/reply RTP ports from SDP `m=audio` for:
    - carrier-host pair.
    - host-core pair.
-3. Build leg filters and run `tshark` per leg against each raw media PCAP.
-4. For each leg/file:
-   - count packets (`tshark ... | wc -l`).
-   - if count `> 10`, create `*-filtered.pcap`.
+3. Build up to 4 leg filters and combine all available filters with logical `OR`.
+4. For each raw media PCAP (single pass per file):
+  - count packets using the combined filter (`tshark ... | wc -l`).
+  - if count `> 10`, create `*-filtered.pcap`.
 5. Merge all filtered files into `media_raw.pcap`.
 6. Process each filtered file:
    - decrypt when possible (`*-decrypted.pcap`),
