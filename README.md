@@ -5,7 +5,7 @@ Production-oriented web application for first-line VoIP support teams to capture
 ## 1) Requirements
 
 This application currently supports only:
-- macOS (`Darwin`)
+- macOS
 - Apple Silicon (`arm64`, M1 or newer)
 
 The app validates this at startup and exits on unsupported platforms.
