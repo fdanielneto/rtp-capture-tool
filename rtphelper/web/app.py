@@ -33,6 +33,8 @@ from rtphelper.services.decryption_service import DecryptionResult, DecryptionSe
 from rtphelper.services.media_extract import extract_stream_to_pcap
 from rtphelper.services.pcap_tools import merge_pcaps
 from rtphelper.services.sip_parser import SdesCryptoMaterial, SipCall, SipMessage, parse_sip_pcap
+from rtphelper.services.correlation_progress import emit_progress
+from rtphelper.services.correlation_worker_client import run_correlation_job_via_subprocess
 from rtphelper.services.stream_matcher import (
     match_streams,
 )
@@ -49,6 +51,9 @@ _LOGS_POLL_RATE_LIMIT_RPS = max(1, int(os.environ.get("RTPHELPER_LOGS_POLL_RATE_
 _LOGS_POLL_CLIENT_WINDOW_S = 1.0
 _logs_poll_rate_lock = threading.Lock()
 _logs_poll_client_hits: Dict[str, List[float]] = {}
+CORRELATION_HEARTBEAT_SECONDS = max(
+    5.0, float(os.environ.get("RTPHELPER_CORRELATION_HEARTBEAT_SECONDS", "10") or "10")
+)
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 ENV_PATH = Path(os.environ.get("RTPHELPER_ENV_FILE", BASE_DIR / "config" / "runtime.env"))
@@ -74,6 +79,7 @@ JOB_ORCHESTRATOR = JobOrchestrator(
 )
 CORRELATION_JOB_WORKER: CorrelationJobWorker | None = None
 EMBEDDED_WORKER_ENABLED = os.environ.get("RTPHELPER_EMBEDDED_WORKER", "1").strip().lower() not in {"0", "false", "no"}
+CORRELATION_WORKER_MODE = os.environ.get("RTPHELPER_CORRELATION_WORKER_MODE", "subprocess").strip().lower() or "subprocess"
 
 
 class LiveCorrelationLog(list):
@@ -90,12 +96,22 @@ class LiveCorrelationLog(list):
         text = str(item)
         super().append(text)
         upper = text.upper()
+        level = "info"
         if upper.startswith("ERROR"):
+            level = "error"
             LOGGER.error(text, extra={"category": "RTP_SEARCH", "correlation_id": self._correlation_id})
         elif upper.startswith("WARN"):
+            level = "warn"
             LOGGER.warning(text, extra={"category": "RTP_SEARCH", "correlation_id": self._correlation_id})
         else:
             LOGGER.info(text, extra={"category": "RTP_SEARCH", "correlation_id": self._correlation_id})
+        emit_progress(text, step="correlation", level=level)
+
+
+def _run_correlation_job_subprocess(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+    if progress_callback is None:
+        return run_correlation_job_via_subprocess(payload)
+    return run_correlation_job_via_subprocess(payload, on_progress=progress_callback)
 
 app = FastAPI(title="RTP Remote Capture Decryptor")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "rtphelper" / "web" / "static")), name="static")
@@ -106,9 +122,16 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "rtphelper" / "web" / "temp
 async def on_startup() -> None:
     global CORRELATION_JOB_WORKER
     if EMBEDDED_WORKER_ENABLED:
-        CORRELATION_JOB_WORKER = CorrelationJobWorker(JOB_ORCHESTRATOR, _run_correlation_job_payload)
+        handler = _run_correlation_job_payload
+        if CORRELATION_WORKER_MODE == "subprocess":
+            handler = _run_correlation_job_subprocess
+        CORRELATION_JOB_WORKER = CorrelationJobWorker(JOB_ORCHESTRATOR, handler)
         CORRELATION_JOB_WORKER.start()
-        LOGGER.info("Embedded correlation worker enabled", extra={"category": "CONFIG"})
+        LOGGER.info(
+            "Embedded correlation worker enabled mode=%s",
+            CORRELATION_WORKER_MODE,
+            extra={"category": "CONFIG"},
+        )
     else:
         CORRELATION_JOB_WORKER = None
         LOGGER.info("Embedded correlation worker disabled", extra={"category": "CONFIG"})
@@ -1503,10 +1526,20 @@ async def correlate(
             extra={"category": "RTP_SEARCH", "correlation_id": call_cid},
         )
         leg_filtered_count = 0
-        for pcap_file in media_pcaps:
+        for pcap_idx, pcap_file in enumerate(media_pcaps, start=1):
             leg_token = str(leg_key or "").replace("leg_", "")
             try:
-                pkt_count = _tshark_count_matches(pcap_file, filter_expr, call_cid)
+                log_lines.append(
+                    f"  Scan start: step={step_num} leg={leg_key} file={pcap_idx}/{len(media_pcaps)} name={pcap_file.name}"
+                )
+                pkt_count = _run_with_heartbeat(
+                    run=lambda: _tshark_count_matches(pcap_file, filter_expr, call_cid),
+                    heartbeat_message=lambda elapsed_s: (
+                        "INFO: tshark count in progress "
+                        f"step={step_num} leg={leg_key} file={pcap_idx}/{len(media_pcaps)} "
+                        f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
+                    ),
+                )
             except RuntimeError as exc:
                 log_lines.append(f"  ERROR: {pcap_file.name} count failed: {exc}")
                 continue
@@ -1517,7 +1550,14 @@ async def correlate(
             if keep:
                 out = filtered_dir / f"{leg_key}-{pcap_file.stem}-filtered.pcap"
                 try:
-                    _tshark_write_filtered(pcap_file, filter_expr, out, call_cid)
+                    _run_with_heartbeat(
+                        run=lambda: _tshark_write_filtered(pcap_file, filter_expr, out, call_cid),
+                        heartbeat_message=lambda elapsed_s: (
+                            "INFO: tshark write in progress "
+                            f"step={step_num} leg={leg_key} file={pcap_idx}/{len(media_pcaps)} "
+                            f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
+                        ),
+                    )
                     filtered_files.append(out)
                     leg_filtered_count += 1
                 except RuntimeError as exc:
@@ -2464,14 +2504,20 @@ def _detected_leg_details(
 def _materialize_media_pcaps_for_correlation(session: CaptureSession, correlation_id: str, log_lines: List[str]) -> List[Path]:
     local_files = [p for files in session.host_files.values() for p in files if p.exists()]
     if local_files:
+        log_lines.append(f"INFO: Using {len(local_files)} local media file(s) already available.")
         return local_files
     if not session.s3_source_objects:
         return []
+    total_files = sum(len(v) for v in session.s3_source_objects.values())
+    log_lines.append(f"== Step 3.1: Materialize media from S3 ({total_files} file(s)) ==")
     cache_dir = session.base_dir / "s3_source_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     materialized: List[Path] = []
+    file_index = 0
+    phase_started = time.monotonic()
     for host_id, keys in sorted(session.s3_source_objects.items()):
         for key in keys:
+            file_index += 1
             base_name = Path(str(key)).name
             target = cache_dir / base_name
             if target.exists():
@@ -2485,9 +2531,20 @@ def _materialize_media_pcaps_for_correlation(session: CaptureSession, correlatio
                         break
                     i += 1
             try:
-                CAPTURE_SERVICE._s3.download_key_to_file(str(key), target)  # type: ignore[attr-defined]
+                log_lines.append(
+                    f"INFO: S3 media file start {file_index}/{total_files} host={host_id} file={base_name}"
+                )
+                _run_with_heartbeat(
+                    run=lambda: CAPTURE_SERVICE._s3.download_key_to_file(str(key), target),  # type: ignore[attr-defined]
+                    heartbeat_message=lambda elapsed_s: (
+                        "INFO: S3 download in progress "
+                        f"file={file_index}/{total_files} host={host_id} file={base_name} elapsed={elapsed_s:.0f}s"
+                    ),
+                )
                 materialized.append(target)
-                log_lines.append(f"INFO: S3 media file ready host={host_id} file={base_name}")
+                log_lines.append(
+                    f"INFO: S3 media file ready {file_index}/{total_files} host={host_id} file={base_name}"
+                )
                 LOGGER.info(
                     "Correlation source materialized from S3 host=%s key=%s local=%s",
                     host_id,
@@ -2504,7 +2561,48 @@ def _materialize_media_pcaps_for_correlation(session: CaptureSession, correlatio
                     exc,
                     extra={"category": "FILES", "correlation_id": correlation_id},
                 )
+    phase_elapsed = time.monotonic() - phase_started
+    log_lines.append(
+        f"INFO: S3 media materialization finished files_ready={len(materialized)}/{total_files} "
+        f"duration={phase_elapsed:.1f}s"
+    )
     return materialized
+
+
+def _run_with_heartbeat(
+    run,
+    heartbeat_message,
+    interval_seconds: float = CORRELATION_HEARTBEAT_SECONDS,
+):
+    done = threading.Event()
+    outcome: Dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            outcome["result"] = run()
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=_target, name="correlation-heartbeat-task", daemon=True)
+    worker.start()
+    started = time.monotonic()
+    next_beat = started + max(1.0, float(interval_seconds))
+    while not done.wait(timeout=0.5):
+        now = time.monotonic()
+        if now >= next_beat:
+            elapsed = max(0.0, now - started)
+            try:
+                msg = str(heartbeat_message(elapsed))
+            except Exception:
+                msg = f"INFO: Correlation task still running elapsed={elapsed:.0f}s"
+            LOGGER.info(msg, extra={"category": "RTP_SEARCH"})
+            next_beat = now + max(1.0, float(interval_seconds))
+    worker.join(timeout=0.2)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
 
 
 def _tshark_count_matches(pcap_file: Path, filter_expr: str, correlation_id: str) -> int:
