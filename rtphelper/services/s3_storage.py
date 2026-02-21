@@ -10,6 +10,8 @@ import datetime as dt
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 
+from rtphelper.size_parser import parse_size_bytes
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -85,14 +87,20 @@ class S3CaptureStorage:
         )
         self._multipart_threshold = max(
             5 * 1024 * 1024,
-            int(os.environ.get("RTPHELPER_S3_MULTIPART_THRESHOLD_BYTES", str(8 * 1024 * 1024)) or str(8 * 1024 * 1024)),
+            parse_size_bytes(
+                os.environ.get("RTPHELPER_S3_MULTIPART_THRESHOLD_BYTES", "200MB"),
+                200 * 1000 * 1000,
+            ),
         )
         self._multipart_chunksize = max(
             5 * 1024 * 1024,
-            int(os.environ.get("RTPHELPER_S3_MULTIPART_CHUNKSIZE_BYTES", str(8 * 1024 * 1024)) or str(8 * 1024 * 1024)),
+            parse_size_bytes(
+                os.environ.get("RTPHELPER_S3_MULTIPART_CHUNKSIZE_BYTES", "100MB"),
+                100 * 1000 * 1000,
+            ),
         )
         self._multipart_max_concurrency = max(
-            1, int(os.environ.get("RTPHELPER_S3_MULTIPART_MAX_CONCURRENCY", "8") or "8")
+            1, int(os.environ.get("RTPHELPER_S3_MULTIPART_MAX_CONCURRENCY", "10") or "10")
         )
         self._multipart_use_threads = (
             os.environ.get("RTPHELPER_S3_MULTIPART_USE_THREADS", "1").strip().lower()

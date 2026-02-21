@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -333,9 +334,40 @@ class CorrelationJobWorker:
                 continue
             self._orchestrator.mark_running(job_id, step="correlation")
             self._orchestrator.progress(job_id, "Correlation processing started", step="correlation")
+            handler_accepts_progress = self._accepts_progress_callback(self._handler)
+
+            def _progress(event: Dict[str, str]) -> None:
+                message = str(event.get("message") or "").strip()
+                if not message:
+                    return
+                step = str(event.get("step") or "correlation")
+                level = str(event.get("level") or "info")
+                self._orchestrator.progress(job_id, message=message, step=step, level=level)
+
             try:
-                result = self._handler(job.payload)
+                if handler_accepts_progress:
+                    result = self._handler(job.payload, _progress)
+                else:
+                    result = self._handler(job.payload)
             except Exception as exc:  # pragma: no cover
                 self._orchestrator.fail(job_id, str(exc))
                 continue
             self._orchestrator.complete(job_id, result)
+
+    @staticmethod
+    def _accepts_progress_callback(handler: Callable[..., Dict[str, Any]]) -> bool:
+        try:
+            sig = inspect.signature(handler)
+        except Exception:
+            return False
+        params = list(sig.parameters.values())
+        if not params:
+            return False
+        if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            return True
+        positional = [
+            p
+            for p in params
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        return len(positional) >= 2

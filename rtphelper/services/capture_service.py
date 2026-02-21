@@ -19,27 +19,29 @@ from rtphelper.config_loader import AppConfig, HostConfig
 from rtphelper.logging_setup import short_uuid
 from rtphelper.rpcap.frame_normalizer import normalize_link_layer_frame
 from rtphelper.rpcap.pcap_writer import RollingPcapWriter
+from rtphelper.size_parser import parse_size_bytes
 from rtphelper.services.rpcap_client import RpcapClient
 from rtphelper.services.s3_storage import S3CaptureStorage, S3Config
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_ROLLING_PCAP_MAX_BYTES = 500 * 1024 * 1024
-DEFAULT_ROLLING_PCAP_MAX_SECONDS = 15
+DEFAULT_ROLLING_PCAP_MAX_BYTES = 500 * 1000 * 1000
+DEFAULT_ROLLING_PCAP_MAX_SECONDS = 0
 DEFAULT_SNAPLEN = 262144
+LIVE_UPLOAD_ROLLED_SIZE_MARGIN_BYTES = 1 * 1024 * 1024
 REACHABILITY_TTL_SECONDS = 30
 REACHABILITY_MAX_WORKERS = 16
 DEFAULT_LOCAL_SPOOL_MAX_BYTES = 5 * 1024 * 1024 * 1024
 S3_MAINTENANCE_INTERVAL_SECONDS = 2.0
 S3_MAINTENANCE_MAX_FILES_ACTIVE = max(
-    1, int(os.environ.get("RTPHELPER_S3_MAINTENANCE_MAX_FILES_ACTIVE", "16") or "16")
+    1, int(os.environ.get("RTPHELPER_S3_MAINTENANCE_MAX_FILES_ACTIVE", "50") or "50")
 )
 _ROLLING_FILE_RE = re.compile(r"^(?P<prefix>.+)-(?P<seq>\d{4})\.(pcap|pcapng)$", re.IGNORECASE)
 S3_POOL_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_POOL_CAPTURE", "6") or "6"))
 S3_POOL_POST_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_POOL_POST_CAPTURE", "60") or "60"))
-S3_UPLOAD_WORKERS_MAX = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_WORKERS_MAX", "12") or "12"))
+S3_UPLOAD_WORKERS_MAX = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_WORKERS_MAX", "6") or "6"))
 S3_UPLOAD_CONCURRENCY_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_CONCURRENCY_CAPTURE", "2") or "2"))
-S3_UPLOAD_CONCURRENCY_POST_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_CONCURRENCY_POST_CAPTURE", "12") or "12"))
+S3_UPLOAD_CONCURRENCY_POST_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_CONCURRENCY_POST_CAPTURE", "4") or "4"))
 S3_UPLOAD_MAX_ATTEMPTS = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_MAX_ATTEMPTS", "5") or "5"))
 RPCAP_RECONNECT_BASE_SECONDS = max(1.0, float(os.environ.get("RTPHELPER_RPCAP_RECONNECT_BASE_SECONDS", "2") or "2"))
 RPCAP_RECONNECT_MAX_SECONDS = max(
@@ -50,15 +52,10 @@ RPCAP_RECONNECT_MAX_ATTEMPTS = max(0, int(os.environ.get("RTPHELPER_RPCAP_RECONN
 
 
 def _rolling_pcap_max_bytes() -> int:
-    raw = os.environ.get("RTPHELPER_ROLLING_PCAP_MAX_BYTES", "").strip()
-    if raw:
-        try:
-            val = int(raw)
-            if val > 0:
-                return val
-        except Exception:
-            pass
-    return DEFAULT_ROLLING_PCAP_MAX_BYTES
+    return parse_size_bytes(
+        os.environ.get("RTPHELPER_ROLLING_PCAP_MAX_BYTES", ""),
+        DEFAULT_ROLLING_PCAP_MAX_BYTES,
+    )
 
 
 def _rolling_pcap_max_seconds() -> int:
@@ -66,7 +63,7 @@ def _rolling_pcap_max_seconds() -> int:
     if raw:
         try:
             val = int(raw)
-            if val > 0:
+            if val >= 0:
                 return val
         except Exception:
             pass
@@ -1004,7 +1001,22 @@ class CaptureService:
                 if curr is None or seq > curr[0]:
                     latest_by_prefix[prefix] = (seq, path)
             hot_files = {p for (_seq, p) in latest_by_prefix.values()}
-            files.extend([p for p in raw_files if p not in hot_files])
+            ready_files: List[Path] = []
+            live_upload_target = _rolling_pcap_max_bytes()
+            min_ready_size = max(24, live_upload_target - LIVE_UPLOAD_ROLLED_SIZE_MARGIN_BYTES)
+            for path in raw_files:
+                if path in hot_files:
+                    continue
+                try:
+                    size_bytes = int(path.stat().st_size)
+                except Exception:
+                    continue
+                if size_bytes < min_ready_size:
+                    # Keep undersized rolled files local while capture is active.
+                    # They are uploaded during final flush after stop.
+                    continue
+                ready_files.append(path)
+            files.extend(ready_files)
         else:
             files.extend(raw_files)
         # Post-process artifacts are always local-only by requirement.
@@ -1950,6 +1962,10 @@ class CaptureService:
                         pass
                     client.close()
         finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
             LOGGER.info(
                 "Capture loop stop session_id=%s host=%s iface=%s",
                 session.session_id,

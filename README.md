@@ -188,29 +188,29 @@ Environment variables:
   - S3 HTTP connection pool while capture is active.
 - `RTPHELPER_S3_POOL_POST_CAPTURE` (optional, default: `60`)
   - S3 HTTP connection pool after capture stops (final flush/upload phase).
-- `RTPHELPER_S3_UPLOAD_WORKERS_MAX` (optional, default: `12`)
+- `RTPHELPER_S3_UPLOAD_WORKERS_MAX` (optional, default: `6`)
   - Number of background upload workers consuming the persistent S3 upload queue.
 - `RTPHELPER_S3_UPLOAD_CONCURRENCY_CAPTURE` (optional, default: `2`)
   - Max concurrent uploads while capture is active.
-- `RTPHELPER_S3_UPLOAD_CONCURRENCY_POST_CAPTURE` (optional, default: `12`)
+- `RTPHELPER_S3_UPLOAD_CONCURRENCY_POST_CAPTURE` (optional, default: `4`)
   - Max concurrent uploads after capture stops (final flush phase).
 - `RTPHELPER_S3_UPLOAD_MAX_ATTEMPTS` (optional, default: `5`)
   - Max retries per upload file before marking it as failed.
 - `RTPHELPER_S3_MAX_POOL_CONNECTIONS` (optional, default: `10`)
   - Base botocore pool size if phase tuning is not applied.
-- `RTPHELPER_S3_MAINTENANCE_MAX_FILES_ACTIVE` (optional, default: `16`)
+- `RTPHELPER_S3_MAINTENANCE_MAX_FILES_ACTIVE` (optional, default: `50`)
   - Max files inspected per maintenance cycle while capture is active.
-- `RTPHELPER_S3_MULTIPART_THRESHOLD_BYTES` (optional, default: `8388608`)
-- `RTPHELPER_S3_MULTIPART_CHUNKSIZE_BYTES` (optional, default: `8388608`)
-- `RTPHELPER_S3_MULTIPART_MAX_CONCURRENCY` (optional, default: `8`)
+- `RTPHELPER_S3_MULTIPART_THRESHOLD_BYTES` (optional, default: `200MB`)
+- `RTPHELPER_S3_MULTIPART_CHUNKSIZE_BYTES` (optional, default: `100MB`)
+- `RTPHELPER_S3_MULTIPART_MAX_CONCURRENCY` (optional, default: `10`)
 - `RTPHELPER_S3_MULTIPART_USE_THREADS` (optional, default: `1`)
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_SESSION_TOKEN` (optional)
-- `RTPHELPER_ROLLING_PCAP_MAX_BYTES` (optional, default: `524288000` = 500 MB)
+- `RTPHELPER_ROLLING_PCAP_MAX_BYTES` (optional, default: `500MB`)
   - Controls raw capture file rollover size per host.
-  - Example: `RTPHELPER_ROLLING_PCAP_MAX_BYTES=1073741824` for 1 GB chunks.
-- `RTPHELPER_ROLLING_PCAP_MAX_SECONDS` (optional, default: `15`)
+  - Example: `RTPHELPER_ROLLING_PCAP_MAX_BYTES=1GB` for 1 GB chunks.
+- `RTPHELPER_ROLLING_PCAP_MAX_SECONDS` (optional, default: `0`)
   - Time-based rollover safeguard for low-traffic captures.
 - `RTPHELPER_LOCAL_SPOOL_MAX_BYTES` (optional, default: `5368709120` = 5 GB)
   - Local spool cap when S3 mode is active.

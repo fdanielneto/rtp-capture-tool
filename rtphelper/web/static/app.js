@@ -776,8 +776,21 @@ function stopCorrelationLiveLogPolling() {
 async function waitForCorrelationJob(jobId, options = {}) {
   const timeoutMs = Number(options.timeoutMs || CORRELATION_TIMEOUT_MS);
   const signal = options.signal || null;
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const onEvents = typeof options.onEvents === "function" ? options.onEvents : null;
   const startedAt = Date.now();
   const encoded = encodeURIComponent(jobId);
+  let eventsCursor = 0;
+
+  const pullEvents = async () => {
+    if (!onEvents) return;
+    const payload = await api(`/api/jobs/${encoded}/events?after_seq=${eventsCursor}`, { signal });
+    const events = Array.isArray(payload?.events) ? payload.events : [];
+    if (!events.length) return;
+    eventsCursor = Number(events[events.length - 1].seq || eventsCursor);
+    onEvents(events);
+  };
+
   while (true) {
     if (signal?.aborted) {
       throw new DOMException("Aborted", "AbortError");
@@ -785,8 +798,15 @@ async function waitForCorrelationJob(jobId, options = {}) {
     if ((Date.now() - startedAt) > timeoutMs) {
       throw new Error(`Correlation timed out after ${Math.round(timeoutMs / 1000)}s`);
     }
+    await pullEvents();
     const status = await api(`/api/jobs/${encoded}`, { signal });
     if (status.status === "queued" || status.status === "running") {
+      if (onProgress) {
+        onProgress({
+          status,
+          elapsedMs: Date.now() - startedAt,
+        });
+      }
       await sleepWithAbort(1000, signal);
       continue;
     }
@@ -794,9 +814,11 @@ async function waitForCorrelationJob(jobId, options = {}) {
       throw new Error("Correlation canceled");
     }
     if (status.status === "failed") {
+      await pullEvents();
       throw new Error(status.error || "Correlation job failed");
     }
     if (status.status === "completed") {
+      await pullEvents();
       const result = await api(`/api/jobs/${encoded}/result`, { signal });
       return result.result || {};
     }
@@ -3134,9 +3156,27 @@ correlateBtn.addEventListener("click", async () => {
     const data = await waitForCorrelationJob(queued.job_id, {
       timeoutMs: CORRELATION_TIMEOUT_MS,
       signal: correlationWaitAbortController.signal,
+      onProgress: (() => {
+        let lastBeat = 0;
+        return ({ status, elapsedMs }) => {
+          const now = Date.now();
+          if ((now - lastBeat) < 15000) return;
+          lastBeat = now;
+          const step = String(status?.progress_step || "correlation");
+          addLog("info", `Correlation running step=${step} elapsed=${Math.round(elapsedMs / 1000)}s`);
+        };
+      })(),
+      onEvents: (events) => {
+        for (const ev of events) {
+          const lvl = String(ev?.level || "info").toLowerCase();
+          const msg = String(ev?.message || "").trim();
+          if (!msg) continue;
+          addLog(lvl, msg);
+        }
+      },
     });
-    addLog("info", `Correlation finished encrypted_likely=${Boolean(data.encrypted_likely)}`);
     logServerLines(data.log_tail || []);
+    addLog("info", `Correlation finished encrypted_likely=${Boolean(data.encrypted_likely)}`);
 
     const hasDownloads =
       data.final_files &&
