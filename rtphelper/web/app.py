@@ -8,7 +8,7 @@ import io
 import datetime as dt
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Set
 import re
 import shutil
 import shlex
@@ -864,9 +864,10 @@ async def decrypt(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    call = _select_best_call(parsed.calls)
-    if call is None:
-        raise HTTPException(status_code=400, detail="No SIP call with SDP negotiation was found")
+    try:
+        call, related_call_ids = _select_call_flow(parsed.calls, sip_pcap.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     call_cid = call.call_id or short_uuid()
     with correlation_context(call_cid):
         LOGGER.info("API decrypt request call_id=%s mode=%s", call.call_id, mode, extra={"category": "SRTP_DECRYPT"})
@@ -884,6 +885,8 @@ async def decrypt(
     # Prepare a concise per-stream log (visible tail only)
     log_lines: List[str] = LiveCorrelationLog(call_cid)
     log_lines.append(f"Call-ID: {call.call_id}")
+    if related_call_ids:
+        log_lines.append(f"Related Call-IDs in flow: {', '.join(related_call_ids)}")
     log_lines.append(f"Streams matched: {len(streams)}")
 
     encrypted_likely = any(
@@ -1230,9 +1233,10 @@ async def correlate(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    call = _select_best_call(parsed.calls)
-    if call is None:
-        raise HTTPException(status_code=400, detail="No SIP call with SDP negotiation was found")
+    try:
+        call, related_call_ids = _select_call_flow(parsed.calls, sip_pcap.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     direction = str(call_direction or "").strip().lower()
     if direction not in {"inbound", "outbound"}:
         raise HTTPException(status_code=400, detail="Call direction is required and must be Inbound or Outbound")
@@ -1249,6 +1253,8 @@ async def correlate(
     log_lines: List[str] = LiveCorrelationLog(call_cid)
     log_lines.append("== Step 1: Parse SIP pcap ==")
     log_lines.append(f"Call-ID: {call.call_id}")
+    if related_call_ids:
+        log_lines.append(f"Related Call-IDs in flow: {', '.join(related_call_ids)}")
     log_lines.append("== Step 2: Build RTP filters from SIP ==")
     log_lines.append("INFO: RTP request/reply media IP+ports are auto-detected from SIP INVITE/200 OK m=audio.")
     log_lines.append(f"INFO: Direction: {direction}")
@@ -1899,6 +1905,74 @@ def _select_best_call(calls: Dict[str, SipCall]) -> SipCall | None:
         return (crypto_count, media_count)
 
     return sorted(calls.values(), key=score, reverse=True)[0]
+
+
+def _call_id_hint_from_filename(filename: str) -> str:
+    name = Path(str(filename or "")).name
+    stem = Path(name).stem
+    if stem.lower().startswith("export_"):
+        hint = stem[len("export_"):].strip()
+    else:
+        hint = ""
+    if hint:
+        hint = re.sub(r"\s+\(\d+\)$", "", hint).strip()
+    return hint
+
+
+def _collect_related_call_ids(calls: Dict[str, SipCall], primary_call_id: str) -> Set[str]:
+    """
+    Build related call-id set using X-Talkdesk-Other-Leg-Call-Id links.
+    """
+    if primary_call_id not in calls:
+        return {primary_call_id}
+    related: Set[str] = {primary_call_id}
+    changed = True
+    while changed:
+        changed = False
+        for cid, call in calls.items():
+            for msg in call.messages:
+                other = str(msg.other_leg_call_id or "").strip()
+                if not other:
+                    continue
+                if other in related and cid not in related:
+                    related.add(cid)
+                    changed = True
+                if cid in related and other in calls and other not in related:
+                    related.add(other)
+                    changed = True
+    return related
+
+
+def _merge_calls_for_flow(calls: Dict[str, SipCall], primary_call_id: str) -> tuple[SipCall, List[str]]:
+    related_ids = _collect_related_call_ids(calls, primary_call_id)
+    selected = [calls[cid] for cid in related_ids if cid in calls]
+    if not selected:
+        best = _select_best_call(calls)
+        if best is None:
+            raise ValueError("No SIP call with SDP negotiation was found")
+        return best, [best.call_id]
+
+    merged = SipCall(call_id=primary_call_id)
+    for call in selected:
+        merged.media_sections.extend(call.media_sections)
+        merged.transport_tuples.update(call.transport_tuples)
+        merged.messages.extend(call.messages)
+    merged.messages.sort(key=lambda m: ((m.packet_number if m.packet_number is not None else 10**12), m.ts))
+    return merged, sorted(related_ids)
+
+
+def _select_call_flow(calls: Dict[str, SipCall], uploaded_filename: str) -> tuple[SipCall, List[str]]:
+    if not calls:
+        raise ValueError("No SIP call with SDP negotiation was found")
+    hint = _call_id_hint_from_filename(uploaded_filename)
+    if hint and hint in calls:
+        primary = hint
+    else:
+        best = _select_best_call(calls)
+        if best is None:
+            raise ValueError("No SIP call with SDP negotiation was found")
+        primary = best.call_id
+    return _merge_calls_for_flow(calls, primary)
 
 
 def _resolve_negotiation_context(call: SipCall, direction: str) -> Dict[str, Any]:
@@ -2719,6 +2793,14 @@ def _file_link(session, kind: str, path: Path) -> str:
 
 
 def _cleanup_local_raw_after_postprocess(session: CaptureSession, log_lines: List[str], correlation_id: str) -> None:
+    if str(session.storage_mode or "").strip().lower() != "s3":
+        msg = (
+            f"Local raw media directory preserved after post-process dir={session.raw_dir} "
+            "storage_mode=local"
+        )
+        log_lines.append(f"INFO: {msg}")
+        LOGGER.info(msg, extra={"category": "FILES", "correlation_id": correlation_id})
+        return
     raw_dir = session.raw_dir
     if not raw_dir.exists():
         return

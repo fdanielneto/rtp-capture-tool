@@ -162,8 +162,8 @@ You can point to another env file with `RTPHELPER_ENV_FILE=/path/to/file.env`.
 ### Storage mode (S3 with local fallback)
 
 Default behavior:
-- `RTPHELPER_STORAGE_MODE=s3`
-- App tries S3 first and falls back to local storage on failures.
+- `RTPHELPER_STORAGE_MODE=local`
+- App captures to local storage by default. Use `s3` to enable S3-backed capture flow.
 
 Important variables:
 - `RTPHELPER_STORAGE_MODE` (`s3` or `local`)

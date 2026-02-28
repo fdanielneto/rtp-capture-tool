@@ -34,6 +34,19 @@ class DecryptionService:
         raw = material.master_key + material.master_salt
         return base64.b64encode(raw).decode("ascii")
 
+    @staticmethod
+    def _srtp_profile_for_suite(suite: str) -> int:
+        suite_norm = str(suite or "").strip().upper()
+        if suite_norm == "AES_CM_128_HMAC_SHA1_80":
+            return Policy.SRTP_PROFILE_AES128_CM_SHA1_80
+        if suite_norm == "AES_CM_128_HMAC_SHA1_32":
+            return Policy.SRTP_PROFILE_AES128_CM_SHA1_32
+        if suite_norm in {"AEAD_AES_128_GCM", "AEAD_AES_128_GCM_8"}:
+            return Policy.SRTP_PROFILE_AEAD_AES_128_GCM
+        if suite_norm in {"AEAD_AES_256_GCM", "AEAD_AES_256_GCM_8"}:
+            return Policy.SRTP_PROFILE_AEAD_AES_256_GCM
+        raise ValueError(f"Unsupported SRTP suite for decrypt: {suite}")
+
     def decrypt_streams(
         self,
         mode: str,
@@ -172,7 +185,8 @@ class DecryptionService:
 
     def _decrypt_single_stream(self, stream: StreamMatch, crypto: SdesCryptoMaterial, output_file: Path) -> int:
         key_blob = crypto.master_key + crypto.master_salt
-        policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND)
+        profile = self._srtp_profile_for_suite(crypto.suite)
+        policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND, srtp_profile=profile)
         session = Session(policy)
 
         decrypted_count = 0
@@ -284,10 +298,31 @@ class DecryptionService:
             )
 
         sessions: List[Session] = []
+        unsupported_suites: List[str] = []
         for mat in materials:
             key_blob = mat.master_key + mat.master_salt
-            policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND)
+            try:
+                profile = self._srtp_profile_for_suite(mat.suite)
+            except ValueError:
+                unsupported_suites.append(str(mat.suite))
+                continue
+            policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND, srtp_profile=profile)
             sessions.append(Session(policy))
+
+        if not sessions:
+            out = output_dir / f"{output_prefix}-no-decrypt-need.pcap"
+            shutil.copy2(input_pcap, out)
+            reason = (
+                f"Unsupported SDES suite(s): {', '.join(sorted(set(unsupported_suites)))}"
+                if unsupported_suites
+                else "No usable decrypt material"
+            )
+            return DecryptionResult(
+                stream_id=output_prefix,
+                status="copied",
+                message=f"{reason}; copied as no-decrypt-need",
+                output_file=out,
+            )
 
         tmp_out = output_dir / f"{output_prefix}-decrypted.pcap"
         writer = PcapWriter(str(tmp_out), append=False, sync=True)

@@ -48,8 +48,8 @@
       <section class="panel" id="captureLocationPanel" hidden>
         <h2>Capture files location</h2>
         <div class="location-choice-group">
-          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationLocal" value="local" /> Local</label>
-          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationS3" value="s3" checked /> AWS S3</label>
+          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationLocal" value="local" checked /> Local</label>
+          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationS3" value="s3" /> AWS S3</label>
         </div>
         <div id="captureLocationDisclaimer" class="help capture-location-warning"></div>
         <div id="s3SpoolDirPanel" hidden>
@@ -161,6 +161,9 @@
         </div>
         <div id="criticalStatus" class="status status-critical" hidden></div>
         <div id="status" class="status">Select a region to continue.</div>
+        <div id="hostPrdFilterWarning" class="help host-prd-filter-warning">
+          In PRD environments, using capture filters is strongly recommended; otherwise, packet drops/data loss may occur.
+        </div>
       </section>
 
       <section class="panel" id="livePanel" hidden>

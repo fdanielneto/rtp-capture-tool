@@ -1,0 +1,35 @@
+{
+  "baseline": {
+    "ref": "main",
+    "metrics_path": "/var/folders/yj/f43x62ts73jfxcrw6lr0k5_r0000gp/T/rtphelper-e2e-compare-un6gb396/baseline/logs/e2e_metrics_baseline.json",
+    "summary": {
+      "scenarios": 3,
+      "passed": 3,
+      "failed": 0,
+      "total_import_seconds": 0.06817337599932216,
+      "total_correlation_seconds": 53.26592141701258,
+      "total_scenario_seconds": 53.337126750004245,
+      "capture_root_total_disk_bytes": 27729384,
+      "capture_root_peak_disk_bytes": 27729384
+    }
+  },
+  "candidate": {
+    "ref": "HEAD",
+    "metrics_path": "/var/folders/yj/f43x62ts73jfxcrw6lr0k5_r0000gp/T/rtphelper-e2e-compare-un6gb396/candidate/logs/e2e_metrics_candidate.json",
+    "summary": {
+      "scenarios": 3,
+      "passed": 3,
+      "failed": 0,
+      "total_import_seconds": 0.071955291001359,
+      "total_correlation_seconds": 25.703641750005772,
+      "total_scenario_seconds": 25.778627083011088,
+      "capture_root_total_disk_bytes": 25838182,
+      "capture_root_peak_disk_bytes": 25838182
+    }
+  },
+  "comparison": {
+    "correlation_time_delta_seconds": -27.562279667006806,
+    "disk_total_delta_bytes": -1891202.0,
+    "disk_peak_delta_bytes": -1891202.0
+  }
+}

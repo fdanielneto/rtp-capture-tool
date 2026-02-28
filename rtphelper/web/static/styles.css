@@ -215,6 +215,18 @@ input::placeholder {
   padding: 12px;
 }
 
+.host-prd-filter-warning {
+  margin-top: 12px;
+  border: 1px solid rgba(249, 115, 22, 0.45);
+  background: rgba(249, 115, 22, 0.12);
+  color: #fdba74;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
 .s3-spool-picker-row {
   display: flex;
   align-items: center;

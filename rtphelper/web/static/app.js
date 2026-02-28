@@ -1716,14 +1716,14 @@ function updateCaptureLocationDisclaimer() {
     return;
   }
   captureLocationDisclaimer.textContent =
-    "AWS S3 upload requires high network throughput. If upload is slower than capture, local disk usage may grow and can fill the disk. If disk space is not enough and internet throughput is low, consider using an external disk.";
+    "AWS S3 upload requires high network throughput and is typically used for long-duration captures. If upload is slower than capture, local disk usage may grow and can fill the disk. If disk space is not enough and internet throughput is low, consider using an external disk.";
 }
 
 function resetCaptureLocationSelection() {
-  selectedCaptureStorage = "s3";
+  selectedCaptureStorage = "local";
   selectedS3SpoolDir = "";
-  if (captureLocationLocal) captureLocationLocal.checked = false;
-  if (captureLocationS3) captureLocationS3.checked = true;
+  if (captureLocationLocal) captureLocationLocal.checked = true;
+  if (captureLocationS3) captureLocationS3.checked = false;
   if (captureLocationS3) {
     captureLocationS3.disabled = !(s3EnabledInApp && s3ConfiguredInApp);
     if (captureLocationS3.disabled) {

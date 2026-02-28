@@ -14,6 +14,18 @@ from scapy.utils import PcapReader
 LOGGER = logging.getLogger(__name__)
 
 _STATUS_LINE_RE = re.compile(r"^SIP/2\.0\s+(\d{3})")
+_SUITE_KEY_SALT_LENGTHS: Dict[str, Tuple[int, int]] = {
+    "AES_CM_128_HMAC_SHA1_80": (16, 14),
+    "AES_CM_128_HMAC_SHA1_32": (16, 14),
+    "AES_192_CM_HMAC_SHA1_80": (24, 14),
+    "AES_192_CM_HMAC_SHA1_32": (24, 14),
+    "AES_256_CM_HMAC_SHA1_80": (32, 14),
+    "AES_256_CM_HMAC_SHA1_32": (32, 14),
+    "AEAD_AES_128_GCM": (16, 12),
+    "AEAD_AES_128_GCM_8": (16, 12),
+    "AEAD_AES_256_GCM": (32, 12),
+    "AEAD_AES_256_GCM_8": (32, 12),
+}
 
 
 @dataclass
@@ -50,6 +62,7 @@ class SipMessage:
     cseq_method: Optional[str] = None
     via_branch: Optional[str] = None
     to_tag: Optional[str] = None
+    other_leg_call_id: Optional[str] = None
     has_sdp: bool = False
     media_sections: List[MediaSection] = field(default_factory=list)
 
@@ -119,6 +132,7 @@ def parse_sip_pcap(pcap_path: Path) -> SipParseResult:
                 cseq_method=cseq_method,
                 via_branch=via_branch,
                 to_tag=to_tag,
+                other_leg_call_id=_header_value(headers, "x-talkdesk-other-leg-call-id"),
             )
 
             if body and "m=" in body:
@@ -320,6 +334,7 @@ def _parse_crypto_line(line: str, warnings: List[str]) -> Optional[SdesCryptoMat
         return None
 
     suite = parts[1]
+    suite_norm = suite.strip().upper()
     inline = None
     for value in parts[2:]:
         if value.startswith("inline:"):
@@ -336,14 +351,22 @@ def _parse_crypto_line(line: str, warnings: List[str]) -> Optional[SdesCryptoMat
         warnings.append(f"Unable to decode inline key: {line}")
         return None
 
-    if len(raw_key) < 30:
+    key_salt = _SUITE_KEY_SALT_LENGTHS.get(suite_norm)
+    if key_salt is None:
+        # Keep backward-compatible parsing for unknown suites; decrypt stage may still reject unsupported suites.
+        key_len, salt_len = 16, 14
+    else:
+        key_len, salt_len = key_salt
+
+    required = key_len + salt_len
+    if len(raw_key) < required:
         warnings.append(f"Crypto key material too short for suite {suite}")
         return None
 
     return SdesCryptoMaterial(
         suite=suite,
-        master_key=raw_key[:16],
-        master_salt=raw_key[16:30],
+        master_key=raw_key[:key_len],
+        master_salt=raw_key[key_len:required],
     )
 
 

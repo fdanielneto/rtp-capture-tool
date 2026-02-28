@@ -57,7 +57,7 @@ class S3Config:
 
     @classmethod
     def from_env(cls) -> "S3Config":
-        mode = os.environ.get("RTPHELPER_STORAGE_MODE", "s3").strip().lower()
+        mode = os.environ.get("RTPHELPER_STORAGE_MODE", "local").strip().lower()
         enabled = mode == "s3"
 
         path_bucket, path_prefix = _split_path_bucket_prefix(
