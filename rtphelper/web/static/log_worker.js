@@ -126,6 +126,9 @@ function formatStructuredProjectMessage(message) {
   if (/^(?:INFO:\s*)?FILTER:/i.test(msg)) {
     return `<span class="log-filter-line">${escapeHtml(msg)}</span>`;
   }
+  if (/^(?:INFO:\s*)?\[[^\]]+\]\s+FILTER:\s*".*"$/i.test(msg)) {
+    return `<span class="log-filter-line">${escapeHtml(msg)}</span>`;
+  }
   const title = inlineTitleForMessage(msg);
   const kv = prioritizeInlineFields(extractInlineKeyValues(msg));
   if (!kv.length) {

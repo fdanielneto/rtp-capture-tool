@@ -33,6 +33,14 @@ from rtphelper.services.decryption_service import DecryptionResult, DecryptionSe
 from rtphelper.services.media_extract import extract_stream_to_pcap
 from rtphelper.services.pcap_tools import merge_pcaps
 from rtphelper.services.sip_parser import SdesCryptoMaterial, SipCall, SipMessage, parse_sip_pcap
+from rtphelper.services.sip_correlation import (
+    correlate_sip_call,
+    group_related_calls,
+    merge_calls_by_group,
+    build_correlation_context,
+    build_tshark_filters,
+    CorrelationContext,
+)
 from rtphelper.services.correlation_progress import emit_progress
 from rtphelper.services.correlation_worker_client import run_correlation_job_via_subprocess
 from rtphelper.services.stream_matcher import (
@@ -1230,12 +1238,27 @@ async def correlate(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    call = _select_best_call(parsed.calls)
-    if call is None:
-        raise HTTPException(status_code=400, detail="No SIP call with SDP negotiation was found")
     direction = str(call_direction or "").strip().lower()
     if direction not in {"inbound", "outbound"}:
         raise HTTPException(status_code=400, detail="Call direction is required and must be Inbound or Outbound")
+
+    # Use new B2BUA-aware correlation with multi-Call-ID grouping
+    try:
+        call, correlation_ctx, all_call_ids = _select_best_call_with_grouping(parsed, direction)
+    except Exception as exc:
+        # Fallback to old method if new correlation fails
+        LOGGER.warning(
+            "New correlation failed, falling back to legacy method: %s",
+            exc,
+            extra={"category": "SIP_CORRELATION"},
+        )
+        call = _select_best_call(parsed.calls)
+        correlation_ctx = None
+        all_call_ids = [call.call_id] if call else []
+
+    if call is None:
+        raise HTTPException(status_code=400, detail="No SIP call with SDP negotiation was found")
+    
     call_cid = call.call_id or short_uuid()
     invites = sorted(
         [m for m in call.messages if m.is_request and (m.method or "").upper() == "INVITE"],
@@ -1248,7 +1271,23 @@ async def correlate(
     analysis_packet = analysis_msg.packet_number if analysis_msg else None
     log_lines: List[str] = LiveCorrelationLog(call_cid)
     log_lines.append("== Step 1: Parse SIP pcap ==")
-    log_lines.append(f"Call-ID: {call.call_id}")
+    
+    # Show all Call-IDs if multiple
+    if len(all_call_ids) > 1:
+        log_lines.append(f"CallID(s): {'; '.join(all_call_ids)}")
+    else:
+        log_lines.append(f"Call-ID: {call.call_id}")
+    
+    # Add RTP Engine detection info from new correlation
+    if correlation_ctx and correlation_ctx.rtp_engine.detected:
+        rtp_eng = correlation_ctx.rtp_engine
+        log_lines.append(f"INFO: RTP Engine detected: YES")
+        log_lines.append(f"INFO:   - SDP c= changed: {rtp_eng.original_sdp_ip} -> {rtp_eng.changed_sdp_ip}")
+        log_lines.append(f"INFO:   - Change detected at packet: {rtp_eng.sdp_change_packet}")
+        log_lines.append(f"INFO:   - Engine IP (packet src_ip): {rtp_eng.engine_ip}")
+    else:
+        log_lines.append("INFO: RTP Engine detected: NO")
+    
     log_lines.append("== Step 2: Build RTP filters from SIP ==")
     log_lines.append("INFO: RTP request/reply media IP+ports are auto-detected from SIP INVITE/200 OK m=audio.")
     log_lines.append(f"INFO: Direction: {direction}")
@@ -1267,6 +1306,12 @@ async def correlate(
             analysis_packet,
             extra={"category": "RTP_SEARCH"},
         )
+        
+        # Add structured logging from new B2BUA correlation context
+        if correlation_ctx:
+            for line in correlation_ctx.log_lines:
+                log_lines.append(line)
+        
         try:
             negotiation = _resolve_negotiation_context(call, direction)
         except ValueError as exc:
@@ -1294,35 +1339,47 @@ async def correlate(
             negotiation["last_packet_invite"],
             extra={"category": "SIP", "correlation_id": call_cid},
         )
-        inline_invite_packet = None
-        inline_200ok_packet = None
+        invite_cipher_packet = None
+        ok_200_cipher_packet = None
         carrier_invite_packet = None
         carrier_200ok_packet = None
         core_invite_packet = None
         core_200ok_packet = None
+        if correlation_ctx:
+            if correlation_ctx.carrier_leg:
+                carrier_invite_packet = correlation_ctx.carrier_leg.invite_packet
+                carrier_200ok_packet = correlation_ctx.carrier_leg.ok_200_packet
+            if correlation_ctx.core_leg:
+                core_invite_packet = correlation_ctx.core_leg.invite_packet
+                core_200ok_packet = correlation_ctx.core_leg.ok_200_packet
+            invite_cipher_packet = carrier_invite_packet
+            ok_200_cipher_packet = carrier_200ok_packet
         try:
-            inline_invite, inline_ok = _select_invite_and_ok_for_direction(call, negotiation, direction)
-            inline_invite_packet = inline_invite.packet_number
-            inline_200ok_packet = inline_ok.packet_number
+            if invite_cipher_packet is None or ok_200_cipher_packet is None:
+                inline_invite, inline_ok = _select_invite_and_ok_for_direction(call, negotiation, direction)
+                invite_cipher_packet = inline_invite.packet_number
+                ok_200_cipher_packet = inline_ok.packet_number
         except ValueError:
             pass
         try:
-            carrier_invite, carrier_ok = _select_carrier_request_reply_messages(call, negotiation, direction)
-            carrier_invite_packet = carrier_invite.packet_number
-            carrier_200ok_packet = carrier_ok.packet_number
+            if carrier_invite_packet is None or carrier_200ok_packet is None:
+                carrier_invite, carrier_ok = _select_carrier_request_reply_messages(call, negotiation, direction)
+                carrier_invite_packet = carrier_invite.packet_number
+                carrier_200ok_packet = carrier_ok.packet_number
         except ValueError:
             pass
         try:
-            core_invite, core_ok = _select_core_request_reply_messages(call, negotiation, direction)
-            core_invite_packet = core_invite.packet_number
-            core_200ok_packet = core_ok.packet_number
+            if core_invite_packet is None or core_200ok_packet is None:
+                core_invite, core_ok = _select_core_request_reply_messages(call, negotiation, direction)
+                core_invite_packet = core_invite.packet_number
+                core_200ok_packet = core_ok.packet_number
         except ValueError:
             pass
         LOGGER.info(
-            "Packet selection analysis_packet=%s inline_invite_packet=%s inline_200ok_packet=%s carrier_invite_packet=%s carrier_200ok_packet=%s core_invite_packet=%s core_200ok_packet=%s",
+            "Packet selection analysis_packet=%s invite_cipher_packet=%s 200ok_cipher_packet=%s carrier_invite_packet=%s carrier_200ok_packet=%s core_invite_packet=%s core_200ok_packet=%s",
             analysis_packet,
-            inline_invite_packet,
-            inline_200ok_packet,
+            invite_cipher_packet,
+            ok_200_cipher_packet,
             carrier_invite_packet,
             carrier_200ok_packet,
             core_invite_packet,
@@ -1332,31 +1389,50 @@ async def correlate(
         log_lines.append(
             "INFO: Packet selection "
             f"analysis_packet={analysis_packet} "
-            f"inline_invite_packet={inline_invite_packet} inline_200ok_packet={inline_200ok_packet} "
+            f"invite_cipher_packet={invite_cipher_packet} 200ok_cipher_packet={ok_200_cipher_packet} "
             f"carrier_invite_packet={carrier_invite_packet} carrier_200ok_packet={carrier_200ok_packet} "
             f"core_invite_packet={core_invite_packet} core_200ok_packet={core_200ok_packet}"
         )
         selected_crypto: List[SdesCryptoMaterial] = []
         crypto_warning: str | None = None
         try:
-            selected_crypto = _select_inline_crypto_for_direction(call, negotiation, direction)
+            if invite_cipher_packet is not None and ok_200_cipher_packet is not None:
+                selected_crypto = _select_inline_crypto_for_packet_pair(
+                    call,
+                    invite_cipher_packet,
+                    ok_200_cipher_packet,
+                )
+            else:
+                selected_crypto = _select_inline_crypto_for_direction(call, negotiation, direction)
         except ValueError as exc:
             crypto_warning = str(exc)
             LOGGER.warning(
                 "Inline selection unavailable; continuing without explicit SDES materials selected_invite_packet=%s selected_200ok_packet=%s reason=%s",
-                inline_invite_packet,
-                inline_200ok_packet,
+                invite_cipher_packet,
+                ok_200_cipher_packet,
                 crypto_warning,
                 extra={"category": "SDES_KEYS", "correlation_id": call_cid},
             )
         try:
-            carrier_request_port, carrier_reply_port, carrier_request_ip, carrier_reply_ip = _resolve_carrier_request_reply_ports(call, negotiation, direction)
+            if correlation_ctx and correlation_ctx.carrier_leg and correlation_ctx.carrier_leg.source_media and correlation_ctx.carrier_leg.destination_media:
+                carrier_request_port = correlation_ctx.carrier_leg.source_media.rtp_port
+                carrier_reply_port = correlation_ctx.carrier_leg.destination_media.rtp_port
+                carrier_request_ip = correlation_ctx.carrier_leg.source_media.rtp_ip
+                carrier_reply_ip = correlation_ctx.carrier_leg.destination_media.rtp_ip
+            else:
+                carrier_request_port, carrier_reply_port, carrier_request_ip, carrier_reply_ip = _resolve_carrier_request_reply_ports(call, negotiation, direction)
         except ValueError as exc:
             log_lines.append(f"ERROR: {exc}")
             _raise_correlation_http_error(str(exc))
             return
         try:
-            core_request_port, core_reply_port, core_request_ip, core_reply_ip = _resolve_core_request_reply_ports(call, negotiation, direction)
+            if correlation_ctx and correlation_ctx.core_leg and correlation_ctx.core_leg.source_media and correlation_ctx.core_leg.destination_media:
+                core_request_port = correlation_ctx.core_leg.source_media.rtp_port
+                core_reply_port = correlation_ctx.core_leg.destination_media.rtp_port
+                core_request_ip = correlation_ctx.core_leg.source_media.rtp_ip
+                core_reply_ip = correlation_ctx.core_leg.destination_media.rtp_ip
+            else:
+                core_request_port, core_reply_port, core_request_ip, core_reply_ip = _resolve_core_request_reply_ports(call, negotiation, direction)
         except ValueError as exc:
             log_lines.append(f"ERROR: {exc}")
             _raise_correlation_http_error(str(exc))
@@ -1455,12 +1531,12 @@ async def correlate(
     if crypto_warning:
         log_lines.append(
             "WARN: SDES inline selection unavailable: "
-            f"{crypto_warning} selected_invite_packet={inline_invite_packet} selected_200ok_packet={inline_200ok_packet}"
+            f"{crypto_warning} selected_invite_packet={invite_cipher_packet} selected_200ok_packet={ok_200_cipher_packet}"
         )
         if encrypted_expected:
             log_lines.append(
                 "WARN: Media appears encrypted but no inline key is available. "
-                f"Files will be marked as no-decrypt-need. selected_invite_packet={inline_invite_packet} selected_200ok_packet={inline_200ok_packet}"
+                f"Files will be marked as no-decrypt-need. selected_invite_packet={invite_cipher_packet} selected_200ok_packet={ok_200_cipher_packet}"
             )
         else:
             log_lines.append("INFO: Media does not appear encrypted. Files will be marked as no-decrypt-need.")
@@ -1469,8 +1545,8 @@ async def correlate(
         for line in _selected_crypto_log_lines(
             selected_crypto,
             direction,
-            request_packet_number=inline_invite_packet,
-            reply_packet_number=inline_200ok_packet,
+            request_packet_number=invite_cipher_packet,
+            reply_packet_number=ok_200_cipher_packet,
         ):
             log_lines.append(f"INFO: {line}")
             LOGGER.info(
@@ -1650,8 +1726,8 @@ async def correlate(
         for line in _selected_crypto_log_lines(
             selected_crypto,
             direction,
-            request_packet_number=inline_invite_packet,
-            reply_packet_number=inline_200ok_packet,
+            request_packet_number=invite_cipher_packet,
+            reply_packet_number=ok_200_cipher_packet,
         ):
             log_lines.append(f"INFO: {line}")
     processed_files: List[Path] = []
@@ -1899,6 +1975,24 @@ def _select_best_call(calls: Dict[str, SipCall]) -> SipCall | None:
         return (crypto_count, media_count)
 
     return sorted(calls.values(), key=score, reverse=True)[0]
+
+
+def _select_best_call_with_grouping(parsed: Any, direction: str) -> Tuple[SipCall, CorrelationContext, List[str]]:
+    """
+    Select the best call using multi-Call-ID grouping via X-Talkdesk-Other-Leg-Call-Id.
+    
+    Returns:
+        Tuple of (merged SipCall, CorrelationContext, list of all Call-IDs)
+    """
+    from rtphelper.services.sip_parser import SipParseResult
+    
+    if not isinstance(parsed, SipParseResult):
+        raise ValueError("Expected SipParseResult")
+    
+    # Use new correlation service to group and correlate
+    ctx, merged_call = correlate_sip_call(parsed, direction)
+    
+    return merged_call, ctx, ctx.call_ids
 
 
 def _resolve_negotiation_context(call: SipCall, direction: str) -> Dict[str, Any]:
@@ -2190,6 +2284,40 @@ def _collect_sdes_materials(msg: SipMessage) -> List[SdesCryptoMaterial]:
     return out
 
 
+def _message_by_packet(call: SipCall, packet_number: int) -> SipMessage | None:
+    for msg in call.messages:
+        if msg.packet_number == packet_number:
+            return msg
+    return None
+
+
+def _select_inline_crypto_for_packet_pair(
+    call: SipCall,
+    invite_packet_number: int,
+    ok_packet_number: int,
+) -> List[SdesCryptoMaterial]:
+    """Select invite/reply SDES materials from explicit packet numbers."""
+    invite = _message_by_packet(call, invite_packet_number)
+    ok = _message_by_packet(call, ok_packet_number)
+    if invite is None or ok is None:
+        raise ValueError("Missing INVITE/200 OK packets for selected cipher pair")
+
+    invite_cryptos = _collect_sdes_materials(invite)
+    ok_cryptos = _collect_sdes_materials(ok)
+    if not invite_cryptos or not ok_cryptos:
+        raise ValueError("Missing SDES inline values in INVITE/200 OK for selected packet pair")
+
+    invite_by_suite: Dict[str, SdesCryptoMaterial] = {}
+    for c in invite_cryptos:
+        invite_by_suite.setdefault(c.suite, c)
+    common = [c for c in ok_cryptos if c.suite in invite_by_suite]
+    if not common:
+        raise ValueError("No common crypto suite between INVITE and 200 OK for selected packet pair")
+    selected_ok = common[0]
+    selected_invite = invite_by_suite[selected_ok.suite]
+    return [selected_invite, selected_ok]
+
+
 def _inline_from_material(material: SdesCryptoMaterial) -> str:
     raw = material.master_key + material.master_salt
     return base64.b64encode(raw).decode("ascii")
@@ -2312,12 +2440,8 @@ def _build_manual_rtp_steps(
     core_reply_ip: str,
     core_reply_port: int,
 ) -> tuple[List[Dict[str, object]], List[str]]:
-    def _format_filter_line(filter_expr: str) -> str:
-        pretty = str(filter_expr or "").replace(" && ", " and/or ")
-        pretty = pretty.replace(" and/or ip.dst==", " and/or dst==")
-        pretty = pretty.replace(" and/or udp.port==", " and/or port==")
-        pretty = pretty.replace(" and/or udp.srcport==", " and/or srcport==")
-        return f"FILTER: --> {pretty} <---"
+    def _format_filter_line(leg_key: str, filter_expr: str) -> str:
+        return f"[{leg_key}] FILTER: \"{filter_expr}\""
 
     steps: List[Dict[str, object]] = []
     debug: List[str] = []
@@ -2370,7 +2494,7 @@ def _build_manual_rtp_steps(
                 "reason": None,
             }
         )
-        debug.append(_format_filter_line(f"ip.src=={carrier_request_ip} && udp.port=={carrier_reply_port}"))
+        debug.append(_format_filter_line("leg_carrier_rtpengine", f"ip.src=={carrier_request_ip} && udp.port=={carrier_reply_port}"))
 
     # Step 2: host -> carrier
     # Expected filter mapping:
@@ -2412,9 +2536,9 @@ def _build_manual_rtp_steps(
             }
         )
         if direction == "outbound":
-            debug.append(_format_filter_line(f"udp.srcport=={host_carrier_port} && ip.dst=={carrier_request_ip}"))
+            debug.append(_format_filter_line("leg_rtpengine_carrier", f"udp.srcport=={host_carrier_port} && ip.dst=={carrier_request_ip}"))
         else:
-            debug.append(_format_filter_line(f"udp.port=={host_carrier_port} && ip.dst=={carrier_request_ip}"))
+            debug.append(_format_filter_line("leg_rtpengine_carrier", f"udp.port=={host_carrier_port} && ip.dst=={carrier_request_ip}"))
 
     # Step 3: host -> core (udp.port + dst.ip from core->host ip)
     core_dst_ip_for_step3 = core_request_ip if direction == "outbound" else core_reply_ip
@@ -2454,9 +2578,9 @@ def _build_manual_rtp_steps(
             }
         )
         if direction == "outbound":
-            debug.append(_format_filter_line(f"udp.srcport=={host_core_port} && ip.dst=={core_dst_ip_for_step3}"))
+            debug.append(_format_filter_line("leg_rtpengine_core", f"udp.srcport=={host_core_port} && ip.dst=={core_dst_ip_for_step3}"))
         else:
-            debug.append(_format_filter_line(f"udp.port=={host_core_port} && ip.dst=={core_dst_ip_for_step3}"))
+            debug.append(_format_filter_line("leg_rtpengine_core", f"udp.port=={host_core_port} && ip.dst=={core_dst_ip_for_step3}"))
 
     # Step 4: core -> host (host + src port style)
     step4_src_ip = core_request_ip if direction == "outbound" else core_reply_ip
@@ -2494,9 +2618,9 @@ def _build_manual_rtp_steps(
             }
         )
         if direction == "outbound":
-            debug.append(_format_filter_line(f"ip.src=={step4_src_ip} && udp.port=={core_port}"))
+            debug.append(_format_filter_line("leg_core_rtpengine", f"ip.src=={step4_src_ip} && udp.port=={core_port}"))
         else:
-            debug.append(_format_filter_line(f"ip.src=={step4_src_ip} && udp.port=={core_port}"))
+            debug.append(_format_filter_line("leg_core_rtpengine", f"ip.src=={step4_src_ip} && udp.port=={core_port}"))
 
     return steps, debug
 
