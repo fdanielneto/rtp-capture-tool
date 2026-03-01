@@ -23,6 +23,23 @@ class SdesCryptoMaterial:
     master_salt: bytes
 
 
+def _sdes_key_salt_lengths(suite: str) -> tuple[int, int]:
+    """
+    Return expected SRTP master key/salt lengths for known SDES suites.
+
+    Defaults to AES_CM_128_HMAC_SHA1_* profile sizes for unknown suites to
+    preserve backward-compatible behavior.
+    """
+    normalized = (suite or "").strip().upper()
+    if normalized == "AEAD_AES_256_GCM":
+        return 32, 12
+    if normalized in {"AEAD_AES_128_GCM", "AEAD_AES_128_GCM_8"}:
+        return 16, 12
+    if normalized in {"AES_CM_128_HMAC_SHA1_80", "AES_CM_128_HMAC_SHA1_32"}:
+        return 16, 14
+    return 16, 14
+
+
 @dataclass
 class MediaSection:
     media_type: str
@@ -50,6 +67,9 @@ class SipMessage:
     cseq_method: Optional[str] = None
     via_branch: Optional[str] = None
     to_tag: Optional[str] = None
+    from_tag: Optional[str] = None
+    call_id: Optional[str] = None
+    other_leg_call_id: Optional[str] = None
     has_sdp: bool = False
     media_sections: List[MediaSection] = field(default_factory=list)
 
@@ -105,6 +125,8 @@ def parse_sip_pcap(pcap_path: Path) -> SipParseResult:
             cseq_num, cseq_method = _parse_cseq(headers.get("cseq"), header_lines)
             via_branch = _parse_via_branch(header_lines)
             to_tag = _parse_to_tag(header_lines)
+            from_tag = _parse_from_tag(header_lines)
+            other_leg_call_id = _parse_other_leg_call_id(header_lines)
 
             msg = SipMessage(
                 packet_number=packet_number,
@@ -119,6 +141,9 @@ def parse_sip_pcap(pcap_path: Path) -> SipParseResult:
                 cseq_method=cseq_method,
                 via_branch=via_branch,
                 to_tag=to_tag,
+                from_tag=from_tag,
+                call_id=call_id,
+                other_leg_call_id=other_leg_call_id,
             )
 
             if body and "m=" in body:
@@ -215,6 +240,31 @@ def _parse_to_tag(header_lines: List[str]) -> Optional[str]:
     if not match:
         return None
     return match.group(1).strip()
+
+
+def _parse_from_tag(header_lines: List[str]) -> Optional[str]:
+    """Parse the tag parameter from the From header."""
+    from_value = None
+    for line in header_lines:
+        lower = line.lower()
+        if lower.startswith("from:") or lower.startswith("f:"):
+            from_value = line.split(":", 1)[1].strip()
+            break
+    if not from_value:
+        return None
+    match = re.search(r"\btag=([^;\s>]+)", from_value, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _parse_other_leg_call_id(header_lines: List[str]) -> Optional[str]:
+    """Parse the X-Talkdesk-Other-Leg-Call-Id header value."""
+    for line in header_lines:
+        lower = line.lower()
+        if lower.startswith("x-talkdesk-other-leg-call-id:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 def _split_message(text: str) -> tuple[str, List[str], Dict[str, str], str]:
@@ -336,14 +386,16 @@ def _parse_crypto_line(line: str, warnings: List[str]) -> Optional[SdesCryptoMat
         warnings.append(f"Unable to decode inline key: {line}")
         return None
 
-    if len(raw_key) < 30:
+    key_len, salt_len = _sdes_key_salt_lengths(suite)
+    expected_len = key_len + salt_len
+    if len(raw_key) < expected_len:
         warnings.append(f"Crypto key material too short for suite {suite}")
         return None
 
     return SdesCryptoMaterial(
         suite=suite,
-        master_key=raw_key[:16],
-        master_salt=raw_key[16:30],
+        master_key=raw_key[:key_len],
+        master_salt=raw_key[key_len:key_len + salt_len],
     )
 
 
