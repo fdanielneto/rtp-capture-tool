@@ -37,6 +37,7 @@ S3_MAINTENANCE_MAX_FILES_ACTIVE = max(
     1, int(os.environ.get("RTPHELPER_S3_MAINTENANCE_MAX_FILES_ACTIVE", "50") or "50")
 )
 _ROLLING_FILE_RE = re.compile(r"^(?P<prefix>.+)-(?P<seq>\d{4})\.(pcap|pcapng)$", re.IGNORECASE)
+_IMPORT_NAME_RE = re.compile(r"^(?P<prefix>.+)-\d{4}\.(pcap|pcapng)$", re.IGNORECASE)
 S3_POOL_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_POOL_CAPTURE", "6") or "6"))
 S3_POOL_POST_CAPTURE = max(1, int(os.environ.get("RTPHELPER_S3_POOL_POST_CAPTURE", "60") or "60"))
 S3_UPLOAD_WORKERS_MAX = max(1, int(os.environ.get("RTPHELPER_S3_UPLOAD_WORKERS_MAX", "6") or "6"))
@@ -123,6 +124,8 @@ class CaptureSession:
     storage_flush_error: Optional[str] = None
     storage_flush_attempts: int = 0
     storage_flush_current_file: Optional[str] = None
+    source_mode: str = "capture"  # capture|import_upload|local_reference|s3_reference
+    raw_dir_managed: bool = True
 
 
 class CaptureService:
@@ -175,6 +178,16 @@ class CaptureService:
         self._set_s3_upload_mode(capture_running=False)
         self._reachable_hosts: Dict[str, Dict[str, Dict[str, List[HostConfig]]]] = {}
         self._unreachable_hosts: Dict[str, Dict[str, Dict[str, Dict[str, str]]]] = {}
+
+    @staticmethod
+    def _host_key_from_capture_filename(filename: str) -> str:
+        """Best-effort host key extraction for imported capture filenames."""
+        name = Path(filename).name
+        match = _IMPORT_NAME_RE.match(name)
+        if not match:
+            return "imported"
+        prefix = match.group("prefix")
+        return prefix or "imported"
 
     @property
     def local_spool_max_bytes(self) -> int:
@@ -1632,6 +1645,8 @@ class CaptureService:
             running=False,
             storage_mode=storage_mode,
             storage_notice=storage_notice,
+            source_mode="import_upload",
+            raw_dir_managed=True,
         )
         if session.storage_notice:
             LOGGER.warning(
@@ -1640,6 +1655,67 @@ class CaptureService:
                 session.storage_notice,
                 extra={"category": "CAPTURE", "correlation_id": session.session_id},
             )
+
+        self._active_session = None
+        self._latest_session = session
+        self._sessions_by_id[session.session_id] = session
+        return session
+
+    def create_import_reference_session(
+        self,
+        media_files: List[Path],
+        base_media_dir: Path,
+        output_dir_name: str | None = None,
+    ) -> CaptureSession:
+        """
+        Create a non-running session that references existing local media files without copying them.
+        Output directories are created under base_media_dir, with no timestamp folder.
+        """
+        if self._active_session and self._active_session.running:
+            raise ValueError("A capture session is already running")
+        if not media_files:
+            raise ValueError("No media files were provided")
+
+        session_id = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        base_dir = base_media_dir.expanduser().resolve()
+        if output_dir_name:
+            safe = _safe_folder_name(output_dir_name)
+            if not safe:
+                raise ValueError("Invalid output directory name")
+            base_dir = base_dir / safe
+        uploads_dir = base_dir / "uploads"
+        decrypted_dir = base_dir / "decrypted"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        decrypted_dir.mkdir(parents=True, exist_ok=True)
+
+        now = dt.datetime.utcnow()
+        session = CaptureSession(
+            session_id=session_id,
+            environment="imported",
+            region="imported",
+            sub_regions=["imported"],
+            bpf_filter="imported",
+            base_dir=base_dir,
+            raw_dir=base_media_dir.expanduser().resolve(),
+            uploads_dir=uploads_dir,
+            decrypted_dir=decrypted_dir,
+            started_at=now,
+            stopped_at=now,
+            running=False,
+            storage_mode="local",
+            storage_notice=None,
+            source_mode="local_reference",
+            raw_dir_managed=False,
+        )
+
+        host_files: Dict[str, List[Path]] = {}
+        for path in media_files:
+            host_key = self._host_key_from_capture_filename(path.name)
+            host_files.setdefault(host_key, []).append(path)
+        for host_id in host_files:
+            host_files[host_id] = sorted(host_files[host_id], key=lambda p: p.name)
+        session.host_files = host_files
+        session.host_packet_counts = {host_id: 0 for host_id in host_files}
 
         self._active_session = None
         self._latest_session = session

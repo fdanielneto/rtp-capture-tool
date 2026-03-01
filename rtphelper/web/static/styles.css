@@ -873,8 +873,8 @@ button:disabled {
 .log {
   margin-top: 10px;
   padding: 10px;
-  background: #0a111d;
-  border: 1px solid #2d4673;
+  background: #03122b;
+  border: 1px solid #2f5ea8;
   color: #d7e2f1;
   border-radius: 8px;
   font-size: 12px;
@@ -934,8 +934,13 @@ button:disabled {
 }
 
 .log-filter-line {
+  color: #d7e2f1;
+  font-weight: 400;
+}
+
+.log-filter-token {
   color: #facc15;
-  font-weight: 600;
+  font-weight: inherit;
 }
 
 .log-live-storage {
@@ -945,7 +950,37 @@ button:disabled {
 
 .log-leg-token {
   color: #ff1493;
-  font-weight: 700;
+  font-weight: inherit;
+}
+
+.log-filter-field {
+  color: #ff1493;
+  font-weight: inherit;
+}
+
+.log-token-blue {
+  color: #93c5fd;
+  font-weight: inherit;
+}
+
+.log-token-pink {
+  color: #a78bfa;
+  font-weight: inherit;
+}
+
+.log-token-yellow {
+  color: #facc15;
+  font-weight: inherit;
+}
+
+.log-token-green {
+  color: #22c55e;
+  font-weight: inherit;
+}
+
+.log-token-value {
+  color: #ffffff;
+  font-weight: inherit;
 }
 
 a {

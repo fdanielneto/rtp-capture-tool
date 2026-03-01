@@ -219,6 +219,66 @@ class JobOrchestrator:
         with self._event_cond:
             self._event_cond.notify_all()
 
+    def cancel(self, job_id: str, reason: str = "Job canceled by user") -> Optional[JobRecord]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if not row:
+                return None
+            status = str(row["status"] or "")
+            now = time.time()
+            if status == "queued":
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'canceled', updated_at = ?, finished_at = ?, progress_step = 'canceled', error_text = ?, result_json = NULL
+                    WHERE job_id = ?
+                    """,
+                    (now, now, str(reason), job_id),
+                )
+                self._append_event(conn, job_id, level="warn", message=str(reason), step="canceled", ts=now)
+                conn.commit()
+            elif status == "running":
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'cancel_requested', updated_at = ?, progress_step = 'cancel_requested', error_text = ?
+                    WHERE job_id = ?
+                    """,
+                    (now, str(reason), job_id),
+                )
+                self._append_event(conn, job_id, level="warn", message=str(reason), step="cancel_requested", ts=now)
+                conn.commit()
+            else:
+                # terminal states: return current snapshot unchanged
+                pass
+        with self._event_cond:
+            self._event_cond.notify_all()
+        return self.get(job_id)
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if not row:
+                return False
+            status = str(row["status"] or "")
+            return status in {"cancel_requested", "canceled"}
+
+    def mark_canceled(self, job_id: str, reason: str = "Job canceled") -> None:
+        with self._connect() as conn:
+            now = time.time()
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'canceled', updated_at = ?, finished_at = ?, progress_step = 'canceled', error_text = ?, result_json = NULL
+                WHERE job_id = ? AND status IN ('queued','running','cancel_requested')
+                """,
+                (now, now, str(reason), job_id),
+            )
+            self._append_event(conn, job_id, level="warn", message=str(reason), step="canceled", ts=now)
+            conn.commit()
+        with self._event_cond:
+            self._event_cond.notify_all()
+
     def _update_job_status(
         self,
         job_id: str,
@@ -334,9 +394,14 @@ class CorrelationJobWorker:
                 continue
             self._orchestrator.mark_running(job_id, step="correlation")
             self._orchestrator.progress(job_id, "Correlation processing started", step="correlation")
+            if self._orchestrator.is_cancel_requested(job_id):
+                self._orchestrator.mark_canceled(job_id, reason="Correlation canceled by user")
+                continue
             handler_accepts_progress = self._accepts_progress_callback(self._handler)
 
             def _progress(event: Dict[str, str]) -> None:
+                if self._orchestrator.is_cancel_requested(job_id):
+                    return
                 message = str(event.get("message") or "").strip()
                 if not message:
                     return
@@ -346,11 +411,21 @@ class CorrelationJobWorker:
 
             try:
                 if handler_accepts_progress:
-                    result = self._handler(job.payload, _progress)
+                    payload = dict(job.payload)
+                    payload["_job_id"] = job_id
+                    result = self._handler(payload, _progress)
                 else:
-                    result = self._handler(job.payload)
+                    payload = dict(job.payload)
+                    payload["_job_id"] = job_id
+                    result = self._handler(payload)
             except Exception as exc:  # pragma: no cover
+                if self._orchestrator.is_cancel_requested(job_id):
+                    self._orchestrator.mark_canceled(job_id, reason="Correlation canceled by user")
+                    continue
                 self._orchestrator.fail(job_id, str(exc))
+                continue
+            if self._orchestrator.is_cancel_requested(job_id):
+                self._orchestrator.mark_canceled(job_id, reason="Correlation canceled by user")
                 continue
             self._orchestrator.complete(job_id, result)
 
