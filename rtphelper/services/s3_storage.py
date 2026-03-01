@@ -57,8 +57,11 @@ class S3Config:
 
     @classmethod
     def from_env(cls) -> "S3Config":
-        mode = os.environ.get("RTPHELPER_STORAGE_MODE", "s3").strip().lower()
-        enabled = mode == "s3"
+        # S3 availability must be independent from default capture storage mode.
+        # `RTPHELPER_STORAGE_MODE` controls default behavior; `RTPHELPER_S3_ENABLED`
+        # controls whether S3 can be selected in the UI/API.
+        enabled_raw = os.environ.get("RTPHELPER_S3_ENABLED", "1").strip().lower()
+        enabled = enabled_raw not in {"0", "false", "no"}
 
         path_bucket, path_prefix = _split_path_bucket_prefix(
             os.environ.get("RTPHELPER_S3_PATH", "td-cpaas-qa-eu-west-1-s3-dialogicsbc/misc/captures")

@@ -870,12 +870,31 @@ button:disabled {
   width: auto;
 }
 
+.log-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex-direction: row-reverse;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbe1ff;
+  margin: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.log-live-toggle input[type="checkbox"] {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+}
+
 .log {
   margin-top: 10px;
   padding: 10px;
-  background: #0a111d;
-  border: 1px solid #2d4673;
-  color: #d7e2f1;
+  background: #111827;
+  border: 1px solid #374151;
+  color: #9ca3af;
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.35;
@@ -905,6 +924,10 @@ button:disabled {
   color: #ef4444;
 }
 
+.log-line-body {
+  color: #94a3b8;
+}
+
 .log-inline-title {
   font-weight: 700;
   color: #dbeafe;
@@ -929,13 +952,18 @@ button:disabled {
 }
 
 .log-plain-line {
-  color: #facc15;
+  color: inherit;
   font-weight: 400;
 }
 
 .log-filter-line {
+  color: inherit;
+  font-weight: 400;
+}
+
+.log-filter-token {
   color: #facc15;
-  font-weight: 600;
+  font-weight: inherit;
 }
 
 .log-live-storage {
@@ -945,7 +973,42 @@ button:disabled {
 
 .log-leg-token {
   color: #ff1493;
-  font-weight: 700;
+  font-weight: inherit;
+}
+
+.log-filter-field {
+  color: #ff1493;
+  font-weight: inherit;
+}
+
+.log-token-blue {
+  color: #ff1493;
+  font-weight: inherit;
+}
+
+.log-token-pink {
+  color: #ff1493;
+  font-weight: inherit;
+}
+
+.log-token-yellow {
+  color: #9bd1ff;
+  font-weight: inherit;
+}
+
+.log-token-filter-yellow {
+  color: #facc15;
+  font-weight: inherit;
+}
+
+.log-token-green {
+  color: #22c55e;
+  font-weight: inherit;
+}
+
+.log-token-value {
+  color: #ffffff;
+  font-weight: inherit;
 }
 
 a {

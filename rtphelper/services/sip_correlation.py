@@ -579,9 +579,7 @@ def build_correlation_context(
 def _add_structured_logs(ctx: CorrelationContext) -> None:
     """Add structured log lines to correlation context."""
     ctx.log_lines.append("")
-    ctx.log_lines.append("=" * 60)
-    ctx.log_lines.append("SIP CORRELATION ANALYSIS")
-    ctx.log_lines.append("=" * 60)
+    ctx.log_lines.append(_format_log_banner("SIP CORRELATION ANALYSIS"))
     ctx.log_lines.append(f"Direction: {ctx.direction.upper()}")
     ctx.log_lines.append(f"CallID(s): {'; '.join(ctx.call_ids)}")
     
@@ -595,7 +593,7 @@ def _add_structured_logs(ctx: CorrelationContext) -> None:
     # Log Carrier leg
     if ctx.carrier_leg:
         leg = ctx.carrier_leg
-        ctx.log_lines.append("-" * 40)
+        ctx.log_lines.append("-" * 25)
         if ctx.rtp_engine.detected:
             ctx.log_lines.append("LEG: CARRIER - RTP ENGINE")
         else:
@@ -614,7 +612,7 @@ def _add_structured_logs(ctx: CorrelationContext) -> None:
     # Log Core leg
     if ctx.core_leg:
         leg = ctx.core_leg
-        ctx.log_lines.append("-" * 40)
+        ctx.log_lines.append("-" * 25)
         if ctx.rtp_engine.detected:
             ctx.log_lines.append("LEG: RTP ENGINE - CORE")
         else:
@@ -629,6 +627,18 @@ def _add_structured_logs(ctx: CorrelationContext) -> None:
             ctx.log_lines.append(f"  200 OK (packet {leg.destination_media.packet_number}):")
             ctx.log_lines.append(f"    RTP IP: {leg.destination_media.rtp_ip}")
             ctx.log_lines.append(f"    RTP Port: {leg.destination_media.rtp_port}")
+        ctx.log_lines.append("-" * 25)
+
+
+def _format_log_banner(text: str, width: int = 67) -> str:
+    """Build a centered banner line with fixed width."""
+    label = f"  {str(text).strip()}  "
+    if len(label) >= width:
+        return label
+    pad = width - len(label)
+    left = pad // 2
+    right = pad - left
+    return f"{'=' * left}{label}{'=' * right}"
     
     ctx.log_lines.append("-" * 40)
     ctx.log_lines.append("")

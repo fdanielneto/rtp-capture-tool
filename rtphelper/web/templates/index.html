@@ -48,8 +48,8 @@
       <section class="panel" id="captureLocationPanel" hidden>
         <h2>Capture files location</h2>
         <div class="location-choice-group">
-          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationLocal" value="local" /> Local</label>
-          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationS3" value="s3" checked /> AWS S3</label>
+          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationLocal" value="local" checked /> Local</label>
+          <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationS3" value="s3" /> AWS S3</label>
         </div>
         <div id="captureLocationDisclaimer" class="help capture-location-warning"></div>
         <div id="s3SpoolDirPanel" hidden>
@@ -225,8 +225,10 @@
         <div class="log-header">
           <h2>Logs</h2>
           <div class="log-controls" aria-label="Log controls">
-            <label for="turnOffStatusCheck" class="log-label">Turn off live logs</label>
-            <input id="turnOffStatusCheck" type="checkbox" checked />
+            <label for="turnOnLiveLogsToggle" class="log-live-toggle">
+              <input id="turnOnLiveLogsToggle" type="checkbox" />
+              <span>Turn on live logs</span>
+            </label>
             <button id="downloadLogBtn" type="button">Download logs</button>
             <button id="clearLogBtn" type="button">Clear</button>
           </div>
