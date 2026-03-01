@@ -117,9 +117,18 @@ class LiveCorrelationLog(list):
 
 
 def _run_correlation_job_subprocess(payload: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+    job_id = str(payload.get("_job_id", "")).strip()
+
+    def _should_cancel() -> bool:
+        return bool(job_id) and JOB_ORCHESTRATOR.is_cancel_requested(job_id)
+
     if progress_callback is None:
-        return run_correlation_job_via_subprocess(payload)
-    return run_correlation_job_via_subprocess(payload, on_progress=progress_callback)
+        return run_correlation_job_via_subprocess(payload, should_cancel=_should_cancel)
+    return run_correlation_job_via_subprocess(
+        payload,
+        on_progress=progress_callback,
+        should_cancel=_should_cancel,
+    )
 
 app = FastAPI(title="RTP Remote Capture Decryptor")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "rtphelper" / "web" / "static")), name="static")
@@ -718,10 +727,52 @@ async def import_capture(
     }
 
 
+@app.post("/api/capture/import-local")
+def import_capture_local(payload: Dict[str, Any]) -> Dict[str, Any]:
+    output_dir_name = str(payload.get("output_dir_name", "")).strip() or None
+    directory_raw = str(payload.get("directory", "")).strip()
+    if not directory_raw:
+        raise HTTPException(status_code=400, detail="directory is required")
+    base = Path(directory_raw).expanduser().resolve()
+    if not base.exists() or not base.is_dir():
+        raise HTTPException(status_code=400, detail="Selected directory does not exist")
+    media_files = sorted(
+        list(base.rglob("*.pcap")) + list(base.rglob("*.pcapng")),
+        key=lambda p: str(p),
+    )
+    if not media_files:
+        raise HTTPException(status_code=400, detail="No .pcap/.pcapng files were found in selected directory")
+
+    try:
+        session = CAPTURE_SERVICE.create_import_reference_session(
+            media_files=media_files,
+            base_media_dir=base,
+            output_dir_name=output_dir_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    LOGGER.info(
+        "API local media reference import completed session_id=%s files=%s base_media_dir=%s",
+        session.session_id,
+        len(media_files),
+        base,
+        extra={"category": "FILES", "correlation_id": session.session_id},
+    )
+    return {
+        "session_id": session.session_id,
+        "running": session.running,
+        "storage_mode": session.storage_mode,
+        "storage_notice": session.storage_notice,
+        "storage_target": CAPTURE_SERVICE.storage_target_hint(session),
+        "storage_flush": CAPTURE_SERVICE.storage_flush_status(session),
+        "raw_files": _raw_file_links(session),
+        "raw_dir": str(base),
+    }
+
+
 @app.get("/api/s3/sessions")
 def list_s3_sessions() -> Dict[str, Any]:
-    if not CAPTURE_SERVICE._s3.enabled:  # type: ignore[attr-defined]
-        raise HTTPException(status_code=400, detail="S3 storage mode is disabled")
     if not CAPTURE_SERVICE._s3.configured:  # type: ignore[attr-defined]
         raise HTTPException(status_code=400, detail="S3 is not configured")
     try:
@@ -738,8 +789,6 @@ def list_s3_sessions() -> Dict[str, Any]:
 
 @app.post("/api/s3/import-session")
 def import_s3_session(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if not CAPTURE_SERVICE._s3.enabled:  # type: ignore[attr-defined]
-        raise HTTPException(status_code=400, detail="S3 storage mode is disabled")
     if not CAPTURE_SERVICE._s3.configured:  # type: ignore[attr-defined]
         raise HTTPException(status_code=400, detail="S3 is not configured")
     session_prefix = str(payload.get("session_prefix", "")).strip()
@@ -1004,11 +1053,31 @@ def _hydrate_session_for_worker(payload: Dict[str, Any]) -> CaptureSession:
     upload_path = Path(str(payload.get("upload_path", "")).strip())
     if not upload_path.exists() or not upload_path.is_file():
         raise ValueError(f"Uploaded SIP pcap not found for job: {upload_path}")
-    base_dir = upload_path.parent.parent
-    raw_dir = base_dir / "raw"
-    uploads_dir = base_dir / "uploads"
-    decrypted_dir = base_dir / "decrypted"
-    if not raw_dir.exists():
+    base_dir_raw = str(payload.get("base_dir", "")).strip()
+    raw_dir_raw = str(payload.get("raw_dir", "")).strip()
+    uploads_dir_raw = str(payload.get("uploads_dir", "")).strip()
+    decrypted_dir_raw = str(payload.get("decrypted_dir", "")).strip()
+
+    if base_dir_raw:
+        base_dir = Path(base_dir_raw).expanduser().resolve()
+    else:
+        base_dir = upload_path.parent.parent
+    if raw_dir_raw:
+        raw_dir = Path(raw_dir_raw).expanduser().resolve()
+    else:
+        raw_dir = base_dir / "raw"
+    if uploads_dir_raw:
+        uploads_dir = Path(uploads_dir_raw).expanduser().resolve()
+    else:
+        uploads_dir = base_dir / "uploads"
+    if decrypted_dir_raw:
+        decrypted_dir = Path(decrypted_dir_raw).expanduser().resolve()
+    else:
+        decrypted_dir = base_dir / "decrypted"
+
+    source_mode = str(payload.get("source_mode", "") or "").strip()
+    raw_dir_managed = bool(payload.get("raw_dir_managed", source_mode != "local_reference"))
+    if raw_dir_managed and not raw_dir.exists():
         raw_dir.mkdir(parents=True, exist_ok=True)
         LOGGER.warning(
             "Raw directory was missing for job session; created dir=%s",
@@ -1021,9 +1090,25 @@ def _hydrate_session_for_worker(payload: Dict[str, Any]) -> CaptureSession:
     session_id = expected_session_id or base_dir.name
 
     host_files: Dict[str, List[Path]] = {}
-    for p in sorted(raw_dir.glob("*.pcap")) + sorted(raw_dir.glob("*.pcapng")):
-        host_key = _host_key_from_capture_filename(p.name)
-        host_files.setdefault(host_key, []).append(p)
+    host_files_payload = payload.get("host_files")
+    if isinstance(host_files_payload, dict):
+        for host_key, paths in host_files_payload.items():
+            if not isinstance(paths, list):
+                continue
+            resolved_paths: List[Path] = []
+            for path_value in paths:
+                raw_path = str(path_value or "").strip()
+                if not raw_path:
+                    continue
+                p = Path(raw_path).expanduser().resolve()
+                if p.exists() and p.is_file():
+                    resolved_paths.append(p)
+            if resolved_paths:
+                host_files[str(host_key)] = sorted(resolved_paths, key=lambda path: path.name)
+    if not host_files:
+        for p in sorted(raw_dir.glob("*.pcap")) + sorted(raw_dir.glob("*.pcapng")):
+            host_key = _host_key_from_capture_filename(p.name)
+            host_files.setdefault(host_key, []).append(p)
 
     session = CaptureSession(
         session_id=session_id,
@@ -1040,6 +1125,8 @@ def _hydrate_session_for_worker(payload: Dict[str, Any]) -> CaptureSession:
         running=False,
         storage_mode=str(payload.get("storage_mode", "local") or "local"),
         storage_notice=(str(payload.get("storage_notice")) if payload.get("storage_notice") else None),
+        source_mode=source_mode or "import_upload",
+        raw_dir_managed=raw_dir_managed,
     )
     session.host_files = host_files
     session.host_packet_counts = {host_id: 0 for host_id in host_files}
@@ -1097,6 +1184,16 @@ async def create_correlation_job(
         "upload_path": str(upload_path),
         "call_direction": direction,
         "debug": str(debug or "0"),
+        "base_dir": str(session.base_dir),
+        "raw_dir": str(session.raw_dir),
+        "uploads_dir": str(session.uploads_dir),
+        "decrypted_dir": str(session.decrypted_dir),
+        "source_mode": str(getattr(session, "source_mode", "") or ""),
+        "raw_dir_managed": bool(getattr(session, "raw_dir_managed", True)),
+        "host_files": {
+            str(host): [str(p) for p in paths]
+            for host, paths in (session.host_files or {}).items()
+        },
         "environment": session.environment,
         "region": session.region,
         "sub_regions": list(session.sub_regions),
@@ -1171,6 +1268,25 @@ def get_job_events(job_id: str, after_seq: int = Query(0, ge=0)) -> Dict[str, An
     }
 
 
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> Dict[str, Any]:
+    job = JOB_ORCHESTRATOR.cancel(job_id, reason="Correlation canceled by user")
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    LOGGER.warning(
+        "Correlation cancellation requested job_id=%s status=%s",
+        job_id,
+        job.status,
+        extra={"category": "RTP_SEARCH", "correlation_id": job_id},
+    )
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress_step": job.progress_step,
+        "error": job.error,
+    }
+
+
 @app.get("/api/jobs/{job_id}/events/stream")
 async def stream_job_events(job_id: str, request: Request, after_seq: int = Query(0, ge=0)) -> StreamingResponse:
     if not JOB_ORCHESTRATOR.get(job_id):
@@ -1202,6 +1318,21 @@ async def stream_job_events(job_id: str, request: Request, after_seq: int = Quer
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _format_log_banner(text: str, width: int = 67) -> str:
+    """
+    Build a centered banner line like:
+    ========  <text>  ========
+    with fixed total width.
+    """
+    label = f"  {str(text).strip()}  "
+    if len(label) >= width:
+        return label
+    pad = width - len(label)
+    left = pad // 2
+    right = pad - left
+    return f"{'=' * left}{label}{'=' * right}"
 
 
 @app.post("/api/correlate")
@@ -1270,7 +1401,7 @@ async def correlate(
         analysis_msg = next((m for m in sorted(call.messages, key=lambda m: m.ts) if m.packet_number is not None), None)
     analysis_packet = analysis_msg.packet_number if analysis_msg else None
     log_lines: List[str] = LiveCorrelationLog(call_cid)
-    log_lines.append("== Step 1: Parse SIP pcap ==")
+    log_lines.append(_format_log_banner("Step 1: Parse SIP pcap"))
     
     # Show all Call-IDs if multiple
     if len(all_call_ids) > 1:
@@ -1288,7 +1419,7 @@ async def correlate(
     else:
         log_lines.append("INFO: RTP Engine detected: NO")
     
-    log_lines.append("== Step 2: Build RTP filters from SIP ==")
+    log_lines.append(_format_log_banner("Step 2: Build RTP filters"))
     log_lines.append("INFO: RTP request/reply media IP+ports are auto-detected from SIP INVITE/200 OK m=audio.")
     log_lines.append(f"INFO: Direction: {direction}")
     log_lines.append(f"INFO: Analysis packet={analysis_packet}")
@@ -1560,14 +1691,14 @@ async def correlate(
         log_lines.append(f"INFO: {line}")
 
     # Run a single tshark scan per media file using one OR-combined filter from all available legs.
-    log_lines.append("== Step 3: Apply RTP filters with tshark (single OR pass per file) ==")
+    log_lines.append(_format_log_banner("Step 3: Apply RTP filters"))
     media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, log_lines)
     log_lines.append(f"INFO: Media capture files available: {len(media_pcaps)}")
     log_lines.append("INFO: All available leg filters are combined with OR and applied once per media capture file.")
 
     step_results: List[Dict[str, object]] = []
     combined_dir = session.base_dir / "combined"
-    filtered_dir = combined_dir / "filtered"
+    filtered_dir = session.base_dir / "filtered"
     filtered_dir.mkdir(parents=True, exist_ok=True)
     filtered_files: List[Path] = []
 
@@ -1632,7 +1763,7 @@ async def correlate(
             log_lines.append(f"  ERROR: {pcap_file.name} count failed: {exc}")
             continue
 
-        keep = pkt_count > 10
+        keep = pkt_count > 1
         log_lines.append(f"  File: {pcap_file.name} -> packets={pkt_count} {'KEEP' if keep else 'SKIP'}")
         if not keep:
             continue
@@ -1675,7 +1806,7 @@ async def correlate(
     step_results.sort(key=lambda item: int(item.get("step", 0)))
 
     if not filtered_files:
-        log_lines.append("ERROR: No filtered RTP files were created (threshold > 10 not met).")
+        log_lines.append("ERROR: No filtered RTP files were created (threshold > 1 not met).")
         log_lines.append(
             f"No RTP/SRTP streams were found for uploaded SIP pcap {upload_path.name}. "
             "Please verify the media files and call direction."
@@ -1713,14 +1844,14 @@ async def correlate(
         }
 
     combined_dir.mkdir(parents=True, exist_ok=True)
-    log_lines.append("== Step 4: Build media_raw.pcap ==")
+    log_lines.append(_format_log_banner("Step 4: Build media files"))
     media_encrypted_pcap = combined_dir / "media_raw.pcap"
     merge_pcaps(media_encrypted_pcap, filtered_files)
     log_lines.append(f"media_raw.pcap created from {len(filtered_files)} filtered files")
 
     media_decrypted_pcap = combined_dir / "media_decrypted.pcap"
     sip_plus_media_decrypted_pcap = combined_dir / "SIP_plus_media_decrypted.pcap"
-    log_lines.append("== Step 5: Detect encryption and decrypt per filtered file ==")
+    log_lines.append(_format_log_banner("Step 5: Detect encryption and decrypt files"))
     if selected_crypto:
         log_lines.append("INFO: Decrypt will use selected SDES materials (suite/inline):")
         for line in _selected_crypto_log_lines(
@@ -1815,7 +1946,7 @@ async def correlate(
         f"INFO: Processed filtered files: decrypted={decrypted_count} no-decrypt-need={no_decrypt_count} total={len(processed_files)}"
     )
 
-    log_lines.append("== Step 6: Merge processed media with SIP ==")
+    log_lines.append(_format_log_banner("Step 6: Merge processed media with SIP"))
     if processed_files:
         filtered_names = [p.name for p in filtered_files]
         no_decrypt_names = [p.name for p in no_decrypt_files]
@@ -2441,7 +2572,19 @@ def _build_manual_rtp_steps(
     core_reply_port: int,
 ) -> tuple[List[Dict[str, object]], List[str]]:
     def _format_filter_line(leg_key: str, filter_expr: str) -> str:
-        return f"[{leg_key}] FILTER: \"{filter_expr}\""
+        leg_alias = {
+            "leg_carrier_rtpengine": "carrier-rtpengine",
+            "leg_rtpengine_carrier": "rtpengine-carrier",
+            "leg_rtpengine_core": "rtpengine-core",
+            "leg_core_rtpengine": "core-rtpengine",
+        }.get(leg_key, leg_key)
+        stream_hint = {
+            "leg_carrier_rtpengine": "media_stream_from_carrier_to_rtpengine",
+            "leg_rtpengine_carrier": "media_stream_from_rtpengine_to_carrier",
+            "leg_rtpengine_core": "media_stream_from_rtpengine_to_core",
+            "leg_core_rtpengine": "media_stream_from_core_to_rtpengine",
+        }.get(leg_key, "media_stream_unknown")
+        return f"[{leg_alias}] FILTER: \"{filter_expr}\" [{stream_hint}]"
 
     steps: List[Dict[str, object]] = []
     debug: List[str] = []
@@ -2843,6 +2986,11 @@ def _file_link(session, kind: str, path: Path) -> str:
 
 
 def _cleanup_local_raw_after_postprocess(session: CaptureSession, log_lines: List[str], correlation_id: str) -> None:
+    # Never remove user-provided raw directories from local-reference imports.
+    if str(getattr(session, "source_mode", "") or "") == "local_reference":
+        return
+    if not bool(getattr(session, "raw_dir_managed", True)):
+        return
     raw_dir = session.raw_dir
     if not raw_dir.exists():
         return

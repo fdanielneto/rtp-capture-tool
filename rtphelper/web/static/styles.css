@@ -870,12 +870,31 @@ button:disabled {
   width: auto;
 }
 
+.log-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex-direction: row-reverse;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbe1ff;
+  margin: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.log-live-toggle input[type="checkbox"] {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+}
+
 .log {
   margin-top: 10px;
   padding: 10px;
-  background: #03122b;
-  border: 1px solid #2f5ea8;
-  color: #d7e2f1;
+  background: #111827;
+  border: 1px solid #374151;
+  color: #9ca3af;
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.35;
@@ -905,6 +924,10 @@ button:disabled {
   color: #ef4444;
 }
 
+.log-line-body {
+  color: #94a3b8;
+}
+
 .log-inline-title {
   font-weight: 700;
   color: #dbeafe;
@@ -929,12 +952,12 @@ button:disabled {
 }
 
 .log-plain-line {
-  color: #facc15;
+  color: inherit;
   font-weight: 400;
 }
 
 .log-filter-line {
-  color: #d7e2f1;
+  color: inherit;
   font-weight: 400;
 }
 
@@ -959,16 +982,21 @@ button:disabled {
 }
 
 .log-token-blue {
-  color: #93c5fd;
+  color: #ff1493;
   font-weight: inherit;
 }
 
 .log-token-pink {
-  color: #a78bfa;
+  color: #ff1493;
   font-weight: inherit;
 }
 
 .log-token-yellow {
+  color: #9bd1ff;
+  font-weight: inherit;
+}
+
+.log-token-filter-yellow {
   color: #facc15;
   font-weight: inherit;
 }

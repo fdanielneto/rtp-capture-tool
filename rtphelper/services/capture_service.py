@@ -1677,7 +1677,10 @@ class CaptureService:
             raise ValueError("No media files were provided")
 
         session_id = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        base_dir = base_media_dir.expanduser().resolve()
+        raw_dir = base_media_dir.expanduser().resolve()
+        # For local reference imports, the selected directory is treated as raw source.
+        # Post-process artifacts must live on the parent workspace (not inside raw).
+        base_dir = raw_dir.parent
         if output_dir_name:
             safe = _safe_folder_name(output_dir_name)
             if not safe:
@@ -1696,7 +1699,7 @@ class CaptureService:
             sub_regions=["imported"],
             bpf_filter="imported",
             base_dir=base_dir,
-            raw_dir=base_media_dir.expanduser().resolve(),
+            raw_dir=raw_dir,
             uploads_dir=uploads_dir,
             decrypted_dir=decrypted_dir,
             started_at=now,

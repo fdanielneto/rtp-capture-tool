@@ -78,6 +78,7 @@ const logSection = document.getElementById("logSection");
 
 const downloadLogBtn = document.getElementById("downloadLogBtn");
 const clearLogBtn = document.getElementById("clearLogBtn");
+const turnOnLiveLogsToggle = document.getElementById("turnOnLiveLogsToggle");
 const appLog = document.getElementById("appLog");
 
 const projectLogLevel = String(document.body.dataset.projectLogLevel || "INFO").toUpperCase();
@@ -138,6 +139,7 @@ let statusPollingLastWarnAt = 0;
 let s3UploadGateActive = false;
 let selectedCaptureStorage = "local";
 let selectedS3SpoolDir = "";
+let selectedProcessMediaSource = "local";
 const STATUS_POLLING_BASE_MS = 3000;
 const STATUS_POLLING_MAX_MS = 60000;
 const LIVE_METRICS_INTERVAL_MS = 3000;
@@ -163,6 +165,7 @@ let logNeedsFullRender = false;
 let logWorker = null;
 let logWorkerReqSeq = 0;
 const logWorkerPending = new Map();
+let liveLogsEnabled = false;
 let droppedLogsUnderPressure = 0;
 let lastDroppedLogsNoticeAt = 0;
 let projectLogPollFailures = 0;
@@ -322,33 +325,40 @@ function scheduleLogRender() {
 
 function buildRenderedLogLine(e) {
   const lvl = normalizeLevel(e.level);
-  const lineClass = lineLevelClass(lvl);
+  const prefixClass = lineLevelClass(lvl);
   const isAlertLevel = lvl === "warn" || lvl === "error";
+  const cleanMessage = stripRedundantLevelPrefix(e.message, lvl);
   if (e.source === "project") {
     let body = isAlertLevel
-      ? escapeHtml(e.message)
+      ? escapeHtml(cleanMessage)
       : e.structured
-        ? formatStructuredProjectMessage(e.message)
-        : escapeHtml(e.message);
-    if (!isAlertLevel && isLiveStorageMessage(e.message)) {
-      body = renderLiveStorageMessage(e.message);
+        ? formatStructuredProjectMessage(cleanMessage)
+        : escapeHtml(cleanMessage);
+    if (!isAlertLevel && isLiveStorageMessage(cleanMessage)) {
+      body = renderLiveStorageMessage(cleanMessage);
     }
     if (!isAlertLevel) {
       body = highlightLegTokens(body);
     }
     const prefix = bracketPrefix(e.displayTs || e.ts, e.displayLevel || lvl);
-    return `<span class="${lineClass}">${prefix}${body}</span>`;
+    if (isAlertLevel) {
+      return `<span class="${prefixClass}">${prefix}${body}</span>`;
+    }
+    return `<span class="${prefixClass}">${prefix}</span><span class="log-line-body">${body}</span>`;
   }
   const prefix = bracketPrefix(e.ts, lvl, true);
   let body = isAlertLevel
-    ? escapeHtml(e.message)
-    : isLiveStorageMessage(e.message)
-      ? renderLiveStorageMessage(e.message)
-      : formatStructuredProjectMessage(e.message);
+    ? escapeHtml(cleanMessage)
+    : isLiveStorageMessage(cleanMessage)
+      ? renderLiveStorageMessage(cleanMessage)
+      : formatStructuredProjectMessage(cleanMessage);
   if (!isAlertLevel) {
     body = highlightLegTokens(body);
   }
-  return `<span class="${lineClass}">${prefix}${body}</span>`;
+  if (isAlertLevel) {
+    return `<span class="${prefixClass}">${prefix}${body}</span>`;
+  }
+  return `<span class="${prefixClass}">${prefix}</span><span class="log-line-body">${body}</span>`;
 }
 
 function flushPendingLogRender() {
@@ -411,6 +421,15 @@ function normalizeLevel(level) {
   return "info";
 }
 
+function stripRedundantLevelPrefix(message, level) {
+  const text = String(message || "");
+  const lvl = normalizeLevel(level);
+  if (lvl === "info") return text.replace(/^INFO:\s*/i, "");
+  if (lvl === "warn") return text.replace(/^WARN(?:ING)?:\s*/i, "");
+  if (lvl === "error") return text.replace(/^ERROR:\s*/i, "");
+  return text;
+}
+
 function lineLevelClass(level) {
   const lvl = normalizeLevel(level);
   if (lvl === "warn") return "log-line-warn";
@@ -447,14 +466,24 @@ function parseStructuredLine(line) {
 
 function formatStructuredProjectMessage(message) {
   const msg = String(message || "").trim();
+  if (/^COMBINED FILTER:/i.test(msg)) {
+    return `<span class="log-token-filter-yellow">${escapeHtml(msg)}</span>`;
+  }
+  if (/^✅\s*Correlation completed successfully\./i.test(msg)) {
+    return `<span class="log-token-green">${escapeHtml(msg)}</span>`;
+  }
+  if (shouldKeepLineWhite(msg)) {
+    return `<span class="log-token-value">${escapeHtml(msg)}</span>`;
+  }
   let escaped = escapeHtml(msg);
+  escaped = escaped.replace(/^\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]\s*/i, "");
 
   const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const colorFieldEquals = (text, fields, cls) => {
     if (!fields.length) return text;
     const names = fields.map(escapeRegex).join("|");
-    return text.replace(new RegExp(`(^|[^\\w])(${names})=`, "gi"), (m, prefix, key) => {
-      return `${prefix}<span class="${cls}">${key}=</span>`;
+    return text.replace(new RegExp(`(^|[^\\w])(${names})=([^\\s|"]+)`, "gi"), (m, prefix, key, value) => {
+      return `${prefix}<span class="${cls}">${key}=</span><span class="log-token-value">${value}</span>`;
     });
   };
 
@@ -481,6 +510,7 @@ function formatStructuredProjectMessage(message) {
     escaped,
     [
       "first_invite_packet",
+      "last_packet_invite",
       "analysis_packet",
       "invite_cipher_packet",
       "200ok_cipher_packet",
@@ -490,6 +520,8 @@ function formatStructuredProjectMessage(message) {
       "invite_packet_number",
       "reply_packet_number",
       "packet_number",
+      "file",
+      "name",
     ],
     "log-token-pink"
   );
@@ -497,19 +529,38 @@ function formatStructuredProjectMessage(message) {
     /\[(media_stream_from_carrier_to_rtpengine|media_stream_from_rtpengine_to_carrier|media_stream_from_rtpengine_to_core|media_stream_from_core_to_rtpengine)\]/gi,
     '<span class="log-token-yellow">[$1]</span>'
   );
-
-  escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-green">COMBINED FILTER:</span>');
-  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-green">FILTER:</span>`);
   escaped = escaped.replace(
-    /\b(packets=)(\d+)(\s+KEEP)\b/gi,
-    '<span class="log-token-green">$1</span><span class="log-token-value">$2</span><span class="log-token-green">$3</span>'
+    /\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
+    '<span class="log-token-yellow">[$1]</span>'
   );
   escaped = escaped.replace(
-    /(combined stream found in file.*)$/gi,
-    '<span class="log-token-green">$1</span>'
+    /^(\s*)(LEG:\s*CARRIER\s*-\s*RTP ENGINE|LEG:\s*RTP ENGINE\s*-\s*CORE)/i,
+    '$1<span class="log-token-value">$2</span>'
+  );
+
+  escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
+  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-filter-yellow">FILTER:</span>`);
+  escaped = escaped.replace(
+    /(<span class="log-token-filter-yellow">COMBINED FILTER:<\/span>\s*)(.*)$/gi,
+    '$1<span class="log-token-filter-yellow">$2</span>'
+  );
+  escaped = escaped.replace(
+    /\b(packets=)(\d+)(\s+KEEP)\b/gi,
+    '$1$2<span class="log-token-green">$3</span>'
   );
 
   return `<span class="log-filter-line">${escaped}</span>`;
+}
+
+function shouldKeepLineWhite(message) {
+  const msg = String(message || "").trim();
+  if (!msg) return false;
+  if (/^=+\s*Step\s+[1-6]:.*=+\s*$/i.test(msg)) return true;
+  if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
+  if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+$/.test(msg)) return true;
+  if (/^-+$/.test(msg)) return true;
+  return false;
 }
 
 function bracketPrefix(ts, level, stripZulu = false) {
@@ -697,6 +748,7 @@ function sleepWithAbort(ms, signal) {
 }
 
 function startCorrelationLiveLogPolling() {
+  if (!liveLogsEnabled) return;
   if (typeof EventSource !== "undefined") {
     startLogStreaming();
   }
@@ -773,6 +825,7 @@ async function waitForCorrelationJob(jobId, options = {}) {
 }
 
 function startLogPolling() {
+  if (!liveLogsEnabled) return;
   if (logPollTimer) clearInterval(logPollTimer);
   logPollTimer = setInterval(pollProjectLogs, 2000);
 }
@@ -788,6 +841,7 @@ function stopLogStreaming() {
 }
 
 function startLogStreaming() {
+  if (!liveLogsEnabled) return;
   if (typeof EventSource === "undefined") {
     startLogPolling();
     return;
@@ -809,8 +863,37 @@ function startLogStreaming() {
   };
   stream.onerror = () => {
     stopLogStreaming();
-    startLogPolling();
+    if (liveLogsEnabled) {
+      startLogPolling();
+    }
   };
+}
+
+function updateLiveLogsToggleButton() {
+  if (!turnOnLiveLogsToggle) return;
+  turnOnLiveLogsToggle.checked = liveLogsEnabled;
+}
+
+function setLiveLogsEnabled(enabled) {
+  const next = Boolean(enabled);
+  if (liveLogsEnabled === next) {
+    updateLiveLogsToggleButton();
+    return;
+  }
+  liveLogsEnabled = next;
+  updateLiveLogsToggleButton();
+  if (liveLogsEnabled) {
+    startLogStreaming();
+    addLog("info", "Live logs enabled.");
+    return;
+  }
+  stopCorrelationLiveLogPolling();
+  stopLogStreaming();
+  if (logPollTimer) {
+    clearInterval(logPollTimer);
+    logPollTimer = null;
+  }
+  addLog("info", "Live logs disabled.");
 }
 
 async function initializeLogOffsetsFromCurrentFiles() {
@@ -1433,6 +1516,9 @@ function setPostCaptureEntryMode(mode) {
   if (mediaSourcePanel) {
     mediaSourcePanel.hidden = postCaptureEntryMode !== "process";
   }
+  if (postCaptureEntryMode !== "process") {
+    selectedProcessMediaSource = "local";
+  }
   if (postCaptureEntryMode !== "process" && s3ImportPanel) {
     s3ImportPanel.hidden = true;
   }
@@ -1529,6 +1615,14 @@ function formatBytes(n) {
 
 async function refreshS3Sessions(revealPanel = true) {
   if (!s3ImportPanel || !s3SessionSelect) return;
+  const shouldRefresh =
+    postCaptureEntryMode === "process" &&
+    selectedProcessMediaSource === "s3";
+  if (!shouldRefresh) {
+    if (revealPanel) s3ImportPanel.hidden = true;
+    setS3ImportStatus("");
+    return;
+  }
   if (s3ImportInFlight) return;
   try {
     s3ImportInFlight = true;
@@ -1665,17 +1759,13 @@ function updateCaptureLocationDisclaimer() {
 }
 
 function resetCaptureLocationSelection() {
-  selectedCaptureStorage = "s3";
+  selectedCaptureStorage = "local";
   selectedS3SpoolDir = "";
-  if (captureLocationLocal) captureLocationLocal.checked = false;
-  if (captureLocationS3) captureLocationS3.checked = true;
+  if (captureLocationLocal) captureLocationLocal.checked = true;
+  if (captureLocationS3) captureLocationS3.checked = false;
   if (captureLocationS3) {
     captureLocationS3.disabled = !(s3EnabledInApp && s3ConfiguredInApp);
-    if (captureLocationS3.disabled) {
-      selectedCaptureStorage = "local";
-      if (captureLocationLocal) captureLocationLocal.checked = true;
-      captureLocationS3.checked = false;
-    }
+    if (captureLocationS3.disabled) captureLocationS3.checked = false;
   }
   updateCaptureLocationDisclaimer();
 }
@@ -2552,7 +2642,7 @@ processBtn.addEventListener("click", () => {
       setS3UploadGate(false, 0);
       rawFiles.innerHTML = "";
       updateCorrelationUiState();
-      refreshS3Sessions(false);
+      selectedProcessMediaSource = "local";
       if (s3ImportPanel) s3ImportPanel.hidden = true;
       setMediaSourceStatus("Choose media source: local directory or S3 session.");
       setStatus("Choose media source before importing files.");
@@ -2567,7 +2657,7 @@ processBtn.addEventListener("click", () => {
   setS3UploadGate(false, 0);
   rawFiles.innerHTML = "";
   updateCorrelationUiState();
-  refreshS3Sessions(false);
+  selectedProcessMediaSource = "local";
   if (s3ImportPanel) s3ImportPanel.hidden = true;
   setMediaSourceStatus("Choose media source: local directory or S3 session.");
   setStatus("Choose media source before importing files.");
@@ -2939,7 +3029,6 @@ stopBtn.addEventListener("click", async () => {
     renderRawFiles(data.raw_files, data.raw_dir, data.storage_mode, data.storage_target);
     handleStorageState(data.storage_mode, data.storage_notice, data.storage_target);
     applyStorageFlushState(data.storage_flush);
-    refreshS3Sessions(false);
     if (isStorageFlushActive(data.storage_flush)) {
       startStatusPolling();
     }
@@ -2991,7 +3080,6 @@ async function importLocalMediaByReference() {
     setStatus("Local media loaded by reference. Continue in Post-capture.");
     renderRawFiles(data.raw_files, data.raw_dir, data.storage_mode, data.storage_target);
     handleStorageState(data.storage_mode, data.storage_notice, data.storage_target);
-    refreshS3Sessions();
   } catch (err) {
     const msg = String(err?.message || "");
     if (msg.toLowerCase().includes("cancelled")) {
@@ -3008,6 +3096,7 @@ async function importLocalMediaByReference() {
 
 chooseLocalMediaBtn?.addEventListener("click", () => {
   if (importInFlight || s3ImportInFlight) return;
+  selectedProcessMediaSource = "local";
   if (s3ImportPanel) s3ImportPanel.hidden = true;
   setMediaSourceStatus("Local source selected. Choose a folder with media files.");
   importLocalMediaByReference();
@@ -3015,6 +3104,7 @@ chooseLocalMediaBtn?.addEventListener("click", () => {
 
 showS3MediaBtn?.addEventListener("click", async () => {
   if (importInFlight || s3ImportInFlight) return;
+  selectedProcessMediaSource = "s3";
   if (s3ImportPanel) s3ImportPanel.hidden = false;
   setMediaSourceStatus("S3 source selected. Choose a session to import automatically.");
   await refreshS3Sessions();
@@ -3115,14 +3205,7 @@ correlateBtn.addEventListener("click", async () => {
       timeoutMs: CORRELATION_TIMEOUT_MS,
       signal: correlationWaitAbortController.signal,
       onProgress: (() => {
-        let lastBeat = 0;
-        return ({ status, elapsedMs }) => {
-          const now = Date.now();
-          if ((now - lastBeat) < 15000) return;
-          lastBeat = now;
-          const step = String(status?.progress_step || "correlation");
-          addLog("info", `Correlation running step=${step} elapsed=${Math.round(elapsedMs / 1000)}s`);
-        };
+        return () => {};
       })(),
       onEvents: (events) => {
         for (const ev of events) {
@@ -3133,7 +3216,6 @@ correlateBtn.addEventListener("click", async () => {
         }
       },
     });
-    logServerLines(data.log_tail || []);
     addLog("info", `Correlation finished encrypted_likely=${Boolean(data.encrypted_likely)}`);
 
     const hasDownloads =
@@ -3142,7 +3224,7 @@ correlateBtn.addEventListener("click", async () => {
 
     if (hasDownloads) {
       renderFinalFiles(data.final_files);
-      addLog("info", "Final files ready for download.");
+      addLog("info", "✅ Correlation completed successfully. Final files are ready for download.");
     } else {
       const message = String(data.message || "No RTP/SRTP streams were found for the uploaded SIP pcap.");
       renderCorrelationNotice(message, "warn");
@@ -3221,6 +3303,10 @@ clearLogBtn.addEventListener("click", () => {
   renderAppLog();
 });
 
+turnOnLiveLogsToggle?.addEventListener("change", () => {
+  setLiveLogsEnabled(Boolean(turnOnLiveLogsToggle.checked));
+});
+
 stayOnCaptureBtn?.addEventListener("click", () => {
   closeCaptureLeaveModal();
 });
@@ -3255,7 +3341,7 @@ window.addEventListener("pagehide", () => {
     setPostCaptureEntryMode("capture");
     resetCaptureLocationSelection();
     await initializeLogOffsetsFromCurrentFiles();
-    startLogStreaming();
+    updateLiveLogsToggleButton();
     await syncUiWithServerCaptureState();
     updateCorrelationUiState();
   } catch (err) {

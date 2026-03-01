@@ -46,14 +46,21 @@ function logLevelFromStructuredLine(line) {
 
 function formatStructuredProjectMessage(message) {
   const msg = String(message || "").trim();
+  if (/^COMBINED FILTER:/i.test(msg)) {
+    return `<span class="log-token-filter-yellow">${escapeHtml(msg)}</span>`;
+  }
+  if (shouldKeepLineWhite(msg)) {
+    return `<span class="log-token-value">${escapeHtml(msg)}</span>`;
+  }
   let escaped = escapeHtml(msg);
+  escaped = escaped.replace(/^\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]\s*/i, "");
 
   const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const colorFieldEquals = (text, fields, cls) => {
     if (!fields.length) return text;
     const names = fields.map(escapeRegex).join("|");
-    return text.replace(new RegExp(`(^|[^\\w])(${names})=`, "gi"), (m, prefix, key) => {
-      return `${prefix}<span class="${cls}">${key}=</span>`;
+    return text.replace(new RegExp(`(^|[^\\w])(${names})=([^\\s|"]+)`, "gi"), (m, prefix, key, value) => {
+      return `${prefix}<span class="${cls}">${key}=</span><span class="log-token-value">${value}</span>`;
     });
   };
 
@@ -80,6 +87,7 @@ function formatStructuredProjectMessage(message) {
     escaped,
     [
       "first_invite_packet",
+      "last_packet_invite",
       "analysis_packet",
       "invite_cipher_packet",
       "200ok_cipher_packet",
@@ -89,6 +97,8 @@ function formatStructuredProjectMessage(message) {
       "invite_packet_number",
       "reply_packet_number",
       "packet_number",
+      "file",
+      "name",
     ],
     "log-token-pink"
   );
@@ -96,19 +106,38 @@ function formatStructuredProjectMessage(message) {
     /\[(media_stream_from_carrier_to_rtpengine|media_stream_from_rtpengine_to_carrier|media_stream_from_rtpengine_to_core|media_stream_from_core_to_rtpengine)\]/gi,
     '<span class="log-token-yellow">[$1]</span>'
   );
-
-  escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-green">COMBINED FILTER:</span>');
-  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-green">FILTER:</span>`);
   escaped = escaped.replace(
-    /\b(packets=)(\d+)(\s+KEEP)\b/gi,
-    '<span class="log-token-green">$1</span><span class="log-token-value">$2</span><span class="log-token-green">$3</span>'
+    /\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
+    '<span class="log-token-yellow">[$1]</span>'
   );
   escaped = escaped.replace(
-    /(combined stream found in file.*)$/gi,
-    '<span class="log-token-green">$1</span>'
+    /^(\s*)(LEG:\s*CARRIER\s*-\s*RTP ENGINE|LEG:\s*RTP ENGINE\s*-\s*CORE)/i,
+    '$1<span class="log-token-value">$2</span>'
+  );
+
+  escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
+  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-filter-yellow">FILTER:</span>`);
+  escaped = escaped.replace(
+    /(<span class="log-token-filter-yellow">COMBINED FILTER:<\/span>\s*)(.*)$/gi,
+    '$1<span class="log-token-filter-yellow">$2</span>'
+  );
+  escaped = escaped.replace(
+    /\b(packets=)(\d+)(\s+KEEP)\b/gi,
+    '$1$2<span class="log-token-green">$3</span>'
   );
 
   return `<span class="log-filter-line">${escaped}</span>`;
+}
+
+function shouldKeepLineWhite(message) {
+  const msg = String(message || "").trim();
+  if (!msg) return false;
+  if (/^=+\s*Step\s+[1-6]:.*=+\s*$/i.test(msg)) return true;
+  if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
+  if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+$/.test(msg)) return true;
+  if (/^-+$/.test(msg)) return true;
+  return false;
 }
 
 self.onmessage = (event) => {
