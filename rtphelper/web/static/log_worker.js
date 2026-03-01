@@ -46,9 +46,6 @@ function logLevelFromStructuredLine(line) {
 
 function formatStructuredProjectMessage(message) {
   const msg = String(message || "").trim();
-  if (/^COMBINED FILTER:/i.test(msg)) {
-    return `<span class="log-token-filter-yellow">${escapeHtml(msg)}</span>`;
-  }
   if (shouldKeepLineWhite(msg)) {
     return `<span class="log-token-value">${escapeHtml(msg)}</span>`;
   }
@@ -118,10 +115,6 @@ function formatStructuredProjectMessage(message) {
   escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
   escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-filter-yellow">FILTER:</span>`);
   escaped = escaped.replace(
-    /(<span class="log-token-filter-yellow">COMBINED FILTER:<\/span>\s*)(.*)$/gi,
-    '$1<span class="log-token-filter-yellow">$2</span>'
-  );
-  escaped = escaped.replace(
     /\b(packets=)(\d+)(\s+KEEP)\b/gi,
     '$1$2<span class="log-token-green">$3</span>'
   );
@@ -135,6 +128,7 @@ function shouldKeepLineWhite(message) {
   if (/^=+\s*Step\s+[1-6]:.*=+\s*$/i.test(msg)) return true;
   if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
   if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*RTP Engine IP Detection\s*=+\s*$/i.test(msg)) return true;
   if (/^=+$/.test(msg)) return true;
   if (/^-+$/.test(msg)) return true;
   return false;

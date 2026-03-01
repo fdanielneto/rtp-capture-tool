@@ -747,6 +747,114 @@ button:disabled {
   color: #fecaca;
 }
 
+.final-files-grid {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr 1.2fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+@media (max-width: 900px) {
+  .final-files-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+.final-file-card {
+  border: 1px solid #2f4f82;
+  border-radius: 10px;
+  background: rgba(10, 25, 45, 0.35);
+  padding: 14px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.final-file-card-featured {
+  border: 2px solid var(--accent);
+  background: rgba(31, 111, 235, 0.08);
+}
+
+.final-file-badge {
+  position: absolute;
+  top: -8px;
+  right: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.final-file-icon {
+  font-size: 36px;
+  margin-bottom: 8px;
+  line-height: 1;
+}
+
+.final-file-card-featured .final-file-icon {
+  font-size: 40px;
+}
+
+.final-file-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.final-file-card-featured .final-file-title {
+  color: #b8d3ff;
+}
+
+.final-file-desc {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 12px;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  text-align: center;
+}
+
+.final-file-btn {
+  display: inline-block;
+  border: 1px solid #3c5f97;
+  background: #0f192b;
+  color: #cbe1ff;
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.final-file-btn:hover {
+  background: #152238;
+  border-color: #4a6fa8;
+}
+
+.final-file-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.final-file-btn-primary:hover {
+  background: #2c7cfc;
+  border-color: #2c7cfc;
+}
+
 .raw-files-grid {
   column-count: 2;
   column-gap: 12px;

@@ -8,7 +8,8 @@ import io
 import datetime as dt
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import shutil
 import shlex
@@ -39,6 +40,7 @@ from rtphelper.services.sip_correlation import (
     merge_calls_by_group,
     build_correlation_context,
     build_tshark_filters,
+    detect_rtpengine_ip_from_pcap,
     CorrelationContext,
 )
 from rtphelper.services.correlation_progress import emit_progress
@@ -61,6 +63,9 @@ _logs_poll_rate_lock = threading.Lock()
 _logs_poll_client_hits: Dict[str, List[float]] = {}
 CORRELATION_HEARTBEAT_SECONDS = max(
     5.0, float(os.environ.get("RTPHELPER_CORRELATION_HEARTBEAT_SECONDS", "10") or "10")
+)
+MAX_PARALLEL_FILTER_WORKERS = max(
+    1, int(os.environ.get("RTPHELPER_MAX_PARALLEL_FILTER_WORKERS", "10") or "10")
 )
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -1687,121 +1692,249 @@ async def correlate(
             )
     else:
         log_lines.append("INFO: No explicit SDES material selected for decrypt phase.")
-    for line in endpoint_debug:
-        log_lines.append(f"INFO: {line}")
+    # Commented out: These filter logs show incomplete data at this stage
+    # for line in endpoint_debug:
+    #     log_lines.append(f"INFO: {line}")
 
-    # Run a single tshark scan per media file using one OR-combined filter from all available legs.
+    # Detect actual RTP Engine IP from PCAP files per instance (if RTP Engine is present)
+    rtpengine_ip_per_instance: Dict[str, str] = {}  # Maps instance_id -> detected_ip
+    if correlation_ctx and correlation_ctx.rtp_engine.detected:
+        log_lines.append(_format_log_banner("RTP Engine IP Detection"))
+        log_lines.append("INFO: RTP Engine detected in SIP signaling. Detecting actual IP per instance from capture files...")
+        
+        # Get media PCAPs for detection
+        temp_media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, [])
+        
+        if temp_media_pcaps:
+            # Extract known IPs (carrier and core) to exclude from detection
+            carrier_ips = set()
+            core_ips = set()
+            
+            if correlation_ctx.carrier_leg:
+                if correlation_ctx.carrier_leg.source_ip:
+                    carrier_ips.add(correlation_ctx.carrier_leg.source_ip)
+                if correlation_ctx.carrier_leg.destination_ip:
+                    carrier_ips.add(correlation_ctx.carrier_leg.destination_ip)
+                if correlation_ctx.carrier_leg.source_media and correlation_ctx.carrier_leg.source_media.rtp_ip:
+                    carrier_ips.add(correlation_ctx.carrier_leg.source_media.rtp_ip)
+            
+            if correlation_ctx.core_leg:
+                if correlation_ctx.core_leg.source_ip:
+                    core_ips.add(correlation_ctx.core_leg.source_ip)
+                if correlation_ctx.core_leg.destination_ip:
+                    core_ips.add(correlation_ctx.core_leg.destination_ip)
+                if correlation_ctx.core_leg.destination_media and correlation_ctx.core_leg.destination_media.rtp_ip:
+                    core_ips.add(correlation_ctx.core_leg.destination_media.rtp_ip)
+            
+            # Group PCAPs by RTP Engine instance
+            pcap_groups = _group_pcaps_by_rtp_instance(temp_media_pcaps)
+            log_lines.append(f"INFO: Found {len(pcap_groups)} RTP Engine instance group(s)")
+            
+            # Detect IP for each RTP Engine instance
+            for instance_id, instance_pcaps in sorted(pcap_groups.items()):
+                if instance_id is None:
+                    log_lines.append(f"INFO: Skipping {len(instance_pcaps)} file(s) without RTP Engine instance identifier")
+                    continue
+                
+                log_lines.append(f"INFO: Processing instance '{instance_id}' with {len(instance_pcaps)} file(s)")
+                
+                # Try to detect from first few files of this instance
+                detected_ip = None
+                for pcap_file in instance_pcaps[:3]:  # Check first 3 files of this instance
+                    detected_ip = detect_rtpengine_ip_from_pcap(
+                        pcap_file,
+                        carrier_ips=carrier_ips,
+                        core_ips=core_ips,
+                        max_packets=5,
+                    )
+                    if detected_ip:
+                        rtpengine_ip_per_instance[instance_id] = detected_ip
+                        log_lines.append(f"INFO:   Instance '{instance_id}' IP detected: {detected_ip} (from {pcap_file.name})")
+                        break
+                
+                if not detected_ip:
+                    log_lines.append(f"WARN:   Could not detect IP for instance '{instance_id}', will use SDP-announced IP")
+            
+            # Log comparison with SDP announced IP
+            if rtpengine_ip_per_instance:
+                log_lines.append(f"INFO: SDP announced IP: {correlation_ctx.rtp_engine.changed_sdp_ip}")
+                unique_detected_ips = set(rtpengine_ip_per_instance.values())
+                if len(unique_detected_ips) > 1:
+                    log_lines.append(f"INFO: Multiple RTP Engine IPs detected: {', '.join(sorted(unique_detected_ips))}")
+                elif unique_detected_ips and list(unique_detected_ips)[0] != correlation_ctx.rtp_engine.changed_sdp_ip:
+                    log_lines.append(f"INFO: IP mismatch detected - using actual IPs in filters")
+            else:
+                log_lines.append("WARN: No RTP Engine IPs detected from any instance")
+        else:
+            log_lines.append("WARN: No media PCAPs available for RTP Engine IP detection")
+
+    # Apply RTP filters per PCAP file using instance-specific IPs
     log_lines.append(_format_log_banner("Step 3: Apply RTP filters"))
     media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, log_lines)
     log_lines.append(f"INFO: Media capture files available: {len(media_pcaps)}")
-    log_lines.append("INFO: All available leg filters are combined with OR and applied once per media capture file.")
+    
+    if rtpengine_ip_per_instance:
+        log_lines.append("INFO: Using per-instance RTP Engine IP detection for filters")
+    else:
+        log_lines.append("INFO: Using standard filter construction (no instance detection)")
 
     step_results: List[Dict[str, object]] = []
     combined_dir = session.base_dir / "combined"
     filtered_dir = session.base_dir / "filtered"
     filtered_dir.mkdir(parents=True, exist_ok=True)
     filtered_files: List[Path] = []
+    
+    # Track filter statistics per instance
+    instance_filter_stats: Dict[str, Dict[str, int]] = {}  # instance_id -> {files_checked, files_filtered}
+    
+    # Thread-safe logging and stats accumulation
+    log_lock = threading.Lock()
+    
+    def add_log_line(line: str) -> None:
+        """Thread-safe log line appender"""
+        with log_lock:
+            log_lines.append(line)
+    
+    def update_instance_stats(inst_id: Optional[str], checked: bool = False, filtered: bool = False) -> None:
+        """Thread-safe instance stats updater"""
+        if inst_id:
+            with log_lock:
+                if inst_id not in instance_filter_stats:
+                    instance_filter_stats[inst_id] = {"files_checked": 0, "files_filtered": 0}
+                if checked:
+                    instance_filter_stats[inst_id]["files_checked"] += 1
+                if filtered:
+                    instance_filter_stats[inst_id]["files_filtered"] += 1
 
-    available_filters: List[Tuple[int, str, str]] = []
-
-    for step in steps:
-        step_num = int(step["step"])
-        leg_key = str(step["leg_key"])
-        available = bool(step["available"])
-        filter_expr = str(step.get("tshark_filter") or "")
-        if not available or not filter_expr:
-            reason = str(step.get("reason") or "unavailable")
-            log_lines.append(f"Step {step_num} ({leg_key}): unavailable; reason={reason}")
-            step_results.append(
-                {
-                    "step": step_num,
-                    "leg_key": leg_key,
-                    "available": False,
-                    "reason": reason,
-                    "filter": None,
-                    "files_checked": len(media_pcaps),
-                    "files_filtered": 0,
-                }
+    # Determine number of parallel workers
+    max_workers = min(MAX_PARALLEL_FILTER_WORKERS, len(media_pcaps), os.cpu_count() or 4)
+    add_log_line(f"INFO: Processing {len(media_pcaps)} capture files...")
+    add_log_line("INFO: Analyzing packets and building filters for each RTP Engine instance...")
+    add_log_line("INFO: This may take a few moments - results will appear as processing completes")
+    
+    # Process files in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        futures = {}
+        for pcap_idx, pcap_file in enumerate(media_pcaps, start=1):
+            instance_id = _extract_rtp_engine_instance(pcap_file.name)
+            rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
+            
+            future = executor.submit(
+                _process_single_pcap_with_filter,
+                pcap_file,
+                pcap_idx,
+                len(media_pcaps),
+                instance_id,
+                rtpengine_actual_ip,
+                correlation_ctx,
+                filtered_dir,
+                call_cid,
             )
-            continue
-
-        available_filters.append((step_num, leg_key, filter_expr))
-
-    combined_filter = " || ".join(f"({filter_expr})" for _, _, filter_expr in available_filters)
-    combined_filtered_count = 0
-
-    if available_filters:
-        log_lines.append(
-            "Step 3 (combined OR): using filters from available legs -> "
-            + ", ".join(f"step={step_num}:{leg_key}" for step_num, leg_key, _ in available_filters)
-        )
-        log_lines.append(f"  Combined filter: {combined_filter}")
-        LOGGER.info(
-            "Applying combined leg filter mode=single_or legs=%s filter=%s",
-            [leg_key for _, leg_key, _ in available_filters],
-            combined_filter,
-            extra={"category": "RTP_SEARCH", "correlation_id": call_cid},
-        )
-
-    for pcap_idx, pcap_file in enumerate(media_pcaps, start=1):
-        if not combined_filter:
-            break
-
-        try:
+            futures[future] = (pcap_file, pcap_idx, instance_id)
+        
+        # Collect results as they complete
+        completed = 0
+        for future in as_completed(futures):
+            pcap_file, pcap_idx, instance_id = futures[future]
+            completed += 1
+            
+            try:
+                result = future.result()
+                
+                if result["status"] == "success":
+                    # Log combined filter
+                    add_log_line(f"COMBINED FILTER: {result['filter']}")
+                    
+                    # Log processing info
+                    instance_label = f"instance={instance_id}" if instance_id else "no_instance"
+                    rtpengine_ip_used = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
+                    ip_label = f"ip={rtpengine_ip_used}" if rtpengine_ip_used else "ip=sdp_announced"
+                    add_log_line(
+                        f"  Scan complete: file={completed}/{len(media_pcaps)} name={pcap_file.name} "
+                        f"{instance_label} {ip_label}"
+                    )
+                    add_log_line(f"  File: {pcap_file.name} -> packets={result['packets']} KEEP")
+                    add_log_line(f"  SUCCESS: {pcap_file.name} filtered (packets={result['packets']})")
+                    
+                    with log_lock:
+                        filtered_files.append(result["output"])
+                    
+                    update_instance_stats(instance_id, checked=True, filtered=True)
+                    
+                elif result["status"] == "skipped":
+                    reason = result.get("reason", "unknown")
+                    if reason == "no_filters":
+                        add_log_line(
+                            f"  File {completed}/{len(media_pcaps)}: {pcap_file.name} -> SKIP (no available filters)"
+                        )
+                    else:
+                        # Log combined filter even for skipped files
+                        if "filter" in result:
+                            add_log_line(f"COMBINED FILTER: {result['filter']}")
+                        
+                        instance_label = f"instance={instance_id}" if instance_id else "no_instance"
+                        rtpengine_ip_used = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
+                        ip_label = f"ip={rtpengine_ip_used}" if rtpengine_ip_used else "ip=sdp_announced"
+                        add_log_line(
+                            f"  Scan complete: file={completed}/{len(media_pcaps)} name={pcap_file.name} "
+                            f"{instance_label} {ip_label}"
+                        )
+                        add_log_line(f"  File: {pcap_file.name} -> packets={result['packets']} SKIP")
+                        
+                        update_instance_stats(instance_id, checked=True, filtered=False)
+                        
+                else:  # error
+                    add_log_line(f"  ERROR: {pcap_file.name} processing failed: {result.get('error', 'unknown error')}")
+                    update_instance_stats(instance_id, checked=True, filtered=False)
+                    
+            except Exception as exc:
+                add_log_line(f"  ERROR: {pcap_file.name} unexpected error: {exc}")
+    
+    # Log per-instance statistics
+    if instance_filter_stats:
+        log_lines.append("INFO: Per-instance filtering statistics:")
+        for inst_id, stats in sorted(instance_filter_stats.items()):
             log_lines.append(
-                f"  Scan start: mode=single_or file={pcap_idx}/{len(media_pcaps)} name={pcap_file.name}"
+                f"INFO:   {inst_id}: checked={stats['files_checked']} filtered={stats['files_filtered']}"
             )
-            pkt_count = _run_with_heartbeat(
-                run=lambda: _tshark_count_matches(pcap_file, combined_filter, call_cid),
-                heartbeat_message=lambda elapsed_s: (
-                    "INFO: tshark count in progress "
-                    f"mode=single_or file={pcap_idx}/{len(media_pcaps)} "
-                    f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
-                ),
-            )
-        except RuntimeError as exc:
-            log_lines.append(f"  ERROR: {pcap_file.name} count failed: {exc}")
-            continue
-
-        keep = pkt_count > 1
-        log_lines.append(f"  File: {pcap_file.name} -> packets={pkt_count} {'KEEP' if keep else 'SKIP'}")
-        if not keep:
-            continue
-
-        out = filtered_dir / f"combined-or-{pcap_file.stem}-filtered.pcap"
-        try:
-            _run_with_heartbeat(
-                run=lambda: _tshark_write_filtered(pcap_file, combined_filter, out, call_cid),
-                heartbeat_message=lambda elapsed_s: (
-                    "INFO: tshark write in progress "
-                    f"mode=single_or file={pcap_idx}/{len(media_pcaps)} "
-                    f"name={pcap_file.name} elapsed={elapsed_s:.0f}s"
-                ),
-            )
-            filtered_files.append(out)
-            combined_filtered_count += 1
-            log_lines.append(f"combined stream found in file {pcap_file.name} (packets={pkt_count})")
-        except RuntimeError as exc:
-            log_lines.append(f"  ERROR: could not create filtered file for {pcap_file.name}: {exc}")
-
-    for step in steps:
-        step_num = int(step["step"])
-        leg_key = str(step["leg_key"])
-        available = bool(step["available"])
-        filter_expr = str(step.get("tshark_filter") or "")
-        if available and filter_expr:
-            step_results.append(
-                {
-                    "step": step_num,
-                    "leg_key": leg_key,
-                    "available": True,
-                    "reason": None,
-                    "filter": filter_expr,
-                    "files_checked": len(media_pcaps),
-                    "files_filtered": combined_filtered_count,
-                    "execution_mode": "single_or",
-                }
-            )
+    
+    # Build step_results summary using last built filters (for backward compatibility)
+    if correlation_ctx:
+        # Use fallback IP=None to get generic filter summary
+        summary_steps = build_tshark_filters(correlation_ctx, None)
+        for step in summary_steps:
+            step_num = int(step["step"])
+            leg_key = str(step["leg_key"])
+            available = bool(step["available"])
+            filter_expr = str(step.get("tshark_filter") or "")
+            
+            if not available or not filter_expr:
+                reason = str(step.get("reason") or "unavailable")
+                step_results.append(
+                    {
+                        "step": step_num,
+                        "leg_key": leg_key,
+                        "available": False,
+                        "reason": reason,
+                        "filter": None,
+                        "files_checked": len(media_pcaps),
+                        "files_filtered": 0,
+                    }
+                )
+            else:
+                step_results.append(
+                    {
+                        "step": step_num,
+                        "leg_key": leg_key,
+                        "available": True,
+                        "reason": None,
+                        "filter": filter_expr,
+                        "files_checked": len(media_pcaps),
+                        "files_filtered": len(filtered_files),
+                        "execution_mode": "per_instance",
+                    }
+                )
 
     step_results.sort(key=lambda item: int(item.get("step", 0)))
 
@@ -2791,6 +2924,49 @@ def _detected_leg_details(
     }
 
 
+def _extract_rtp_engine_instance(filename: str) -> Optional[str]:
+    """
+    Extract RTP Engine instance identifier from filename including region.
+    
+    Examples:
+        us-east-1-prd-us-east-1-rtp-1-0001.pcap -> "us-east-1:rtp-1"
+        us-west-2-prd-us-east-1-rtp-2-0123.pcap -> "us-west-2:rtp-2"
+        eu-west-1-prd-eu-west-1-rtp-3-0001.pcap -> "eu-west-1:rtp-3"
+        some-other-file.pcap -> None
+        
+    Returns:
+        The RTP Engine instance identifier with region (e.g., "us-east-1:rtp-1") or None
+    """
+    import re
+    # Match pattern: {region}-prd-{anything}-rtp-{number}
+    # Captures region at start and rtp-{number} pattern
+    pattern = r'^([a-z]+-[a-z]+-\d+)-prd-.*?(rtp-\d+)'
+    match = re.search(pattern, filename, re.IGNORECASE)
+    if match:
+        region = match.group(1).lower()
+        rtp_instance = match.group(2).lower()
+        return f"{region}:{rtp_instance}"
+    return None
+
+
+def _group_pcaps_by_rtp_instance(pcap_files: List[Path]) -> Dict[Optional[str], List[Path]]:
+    """
+    Group PCAP files by RTP Engine instance identifier.
+    
+    Returns:
+        Dictionary mapping instance_id -> list of PCAP files
+        Files without identifiable instance go under None key
+    """
+    from collections import defaultdict
+    groups: Dict[Optional[str], List[Path]] = defaultdict(list)
+    
+    for pcap_file in pcap_files:
+        instance_id = _extract_rtp_engine_instance(pcap_file.name)
+        groups[instance_id].append(pcap_file)
+    
+    return dict(groups)
+
+
 def _materialize_media_pcaps_for_correlation(session: CaptureSession, correlation_id: str, log_lines: List[str]) -> List[Path]:
     local_files = [p for files in session.host_files.values() for p in files if p.exists()]
     if local_files:
@@ -2893,6 +3069,87 @@ def _run_with_heartbeat(
     if "error" in outcome:
         raise outcome["error"]
     return outcome.get("result")
+
+
+def _process_single_pcap_with_filter(
+    pcap_file: Path,
+    pcap_idx: int,
+    total_pcaps: int,
+    instance_id: Optional[str],
+    rtpengine_actual_ip: Optional[str],
+    correlation_ctx: Optional[CorrelationContext],
+    filtered_dir: Path,
+    call_cid: str,
+) -> Dict[str, Any]:
+    """
+    Process a single PCAP file with filters in parallel.
+    Thread-safe function that builds filters, counts packets, and writes filtered output.
+    
+    Returns:
+        Dictionary with processing results for aggregation
+    """
+    try:
+        # Build filters for this specific instance
+        if correlation_ctx:
+            steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip)
+        else:
+            steps = []
+        
+        # Collect available filters for this file
+        available_filters: List[Tuple[int, str, str]] = []
+        for step in steps:
+            step_num = int(step["step"])
+            leg_key = str(step["leg_key"])
+            available = bool(step["available"])
+            filter_expr = str(step.get("tshark_filter") or "")
+            if available and filter_expr:
+                available_filters.append((step_num, leg_key, filter_expr))
+        
+        if not available_filters:
+            return {
+                "status": "skipped",
+                "reason": "no_filters",
+                "file": pcap_file,
+                "instance_id": instance_id,
+                "packets": 0,
+            }
+        
+        # Combine filters with OR
+        combined_filter = " || ".join(f"({filter_expr})" for _, _, filter_expr in available_filters)
+        
+        # Count matching packets
+        pkt_count = _tshark_count_matches(pcap_file, combined_filter, call_cid)
+        
+        if pkt_count <= 1:
+            return {
+                "status": "skipped",
+                "reason": "no_packets",
+                "file": pcap_file,
+                "instance_id": instance_id,
+                "packets": pkt_count,
+                "filter": combined_filter,
+            }
+        
+        # Write filtered PCAP
+        out_file = filtered_dir / f"combined-or-{pcap_file.stem}-filtered.pcap"
+        _tshark_write_filtered(pcap_file, combined_filter, out_file, call_cid)
+        
+        return {
+            "status": "success",
+            "file": pcap_file,
+            "output": out_file,
+            "instance_id": instance_id,
+            "packets": pkt_count,
+            "filter": combined_filter,
+        }
+        
+    except Exception as exc:
+        return {
+            "status": "error",
+            "file": pcap_file,
+            "instance_id": instance_id,
+            "error": str(exc),
+        }
 
 
 def _tshark_count_matches(pcap_file: Path, filter_expr: str, correlation_id: str) -> int:
