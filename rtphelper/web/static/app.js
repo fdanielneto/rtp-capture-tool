@@ -78,7 +78,6 @@ const logSection = document.getElementById("logSection");
 
 const downloadLogBtn = document.getElementById("downloadLogBtn");
 const clearLogBtn = document.getElementById("clearLogBtn");
-const turnOnLiveLogsToggle = document.getElementById("turnOnLiveLogsToggle");
 const appLog = document.getElementById("appLog");
 
 const projectLogLevel = String(document.body.dataset.projectLogLevel || "INFO").toUpperCase();
@@ -527,8 +526,8 @@ function formatStructuredProjectMessage(message) {
     '<span class="log-token-yellow">[$1]</span>'
   );
   escaped = escaped.replace(
-    /\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
-    '<span class="log-token-yellow">[$1]</span>'
+    /\[(carrier[_-]to[_-]rtpengine|rtpengine[_-]to[_-]carrier|rtpengine[_-]to[_-]core|core[_-]to[_-]rtpengine|carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
+    '<span class="log-token-muted">[$1]</span>'
   );
   escaped = escaped.replace(
     /^(\s*)(LEG:\s*CARRIER\s*-\s*RTP ENGINE|LEG:\s*RTP ENGINE\s*-\s*CORE)/i,
@@ -536,7 +535,7 @@ function formatStructuredProjectMessage(message) {
   );
 
   escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
-  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-filter-yellow">FILTER:</span>`);
+  escaped = escaped.replace(/(^|[^A-Z])(FILTER:|Filter:)/g, (m, prefix, token) => `${prefix}<span class="log-token-filter-yellow">${token}</span>`);
   escaped = escaped.replace(
     /\b(packets=)(\d+)(\s+KEEP)\b/gi,
     '$1$2<span class="log-token-green">$3</span>'
@@ -549,6 +548,8 @@ function shouldKeepLineWhite(message) {
   const msg = String(message || "").trim();
   if (!msg) return false;
   if (/^=+\s*Step\s+[1-6]:.*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Phase\s+1:\s*Pre-filtering\s*\(count packets\)\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Phase\s+2:\s*Extract individual legs\s*=+\s*$/i.test(msg)) return true;
   if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
   if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
   if (/^=+\s*RTP Engine IP Detection\s*=+\s*$/i.test(msg)) return true;
@@ -863,19 +864,12 @@ function startLogStreaming() {
   };
 }
 
-function updateLiveLogsToggleButton() {
-  if (!turnOnLiveLogsToggle) return;
-  turnOnLiveLogsToggle.checked = liveLogsEnabled;
-}
-
 function setLiveLogsEnabled(enabled) {
   const next = Boolean(enabled);
   if (liveLogsEnabled === next) {
-    updateLiveLogsToggleButton();
     return;
   }
   liveLogsEnabled = next;
-  updateLiveLogsToggleButton();
   if (liveLogsEnabled) {
     startLogStreaming();
     addLog("info", "Live logs enabled.");
@@ -2059,8 +2053,11 @@ async function api(path, options = {}) {
   const rid = requestId();
   const method = (options.method || "GET").toUpperCase();
   const isLogPoll = path === "/api/logs/poll" || path === "/api/logs/stream";
+  const isJobStatusPoll = /^\/api\/jobs\/[^/]+$/.test(path);
+  const isJobEventsPoll = /^\/api\/jobs\/[^/]+\/events(?:\?.*)?$/.test(path);
+  const isJobPoll = isJobStatusPoll || isJobEventsPoll;
 
-  if (DEBUG_ENABLED && !isLogPoll) {
+  if (DEBUG_ENABLED && !isLogPoll && !isJobPoll) {
     if (options.body instanceof FormData) {
       const parts = [];
       for (const [k, v] of options.body.entries()) {
@@ -2086,7 +2083,7 @@ async function api(path, options = {}) {
     data = null;
   }
 
-  if (DEBUG_ENABLED && !isLogPoll) {
+  if (DEBUG_ENABLED && !isLogPoll && !isJobPoll) {
     addLog("debug", `[res ${rid}] ${method} ${path} status=${response.status}`);
   }
 
@@ -3305,10 +3302,6 @@ clearLogBtn.addEventListener("click", () => {
   renderAppLog();
 });
 
-turnOnLiveLogsToggle?.addEventListener("change", () => {
-  setLiveLogsEnabled(Boolean(turnOnLiveLogsToggle.checked));
-});
-
 stayOnCaptureBtn?.addEventListener("click", () => {
   closeCaptureLeaveModal();
 });
@@ -3343,7 +3336,6 @@ window.addEventListener("pagehide", () => {
     setPostCaptureEntryMode("capture");
     resetCaptureLocationSelection();
     await initializeLogOffsetsFromCurrentFiles();
-    updateLiveLogsToggleButton();
     await syncUiWithServerCaptureState();
     updateCorrelationUiState();
   } catch (err) {

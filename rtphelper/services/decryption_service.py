@@ -34,6 +34,22 @@ class DecryptionService:
         raw = material.master_key + material.master_salt
         return base64.b64encode(raw).decode("ascii")
 
+    @staticmethod
+    def _map_suite_to_srtp_profile(suite: str) -> int:
+        """
+        Map SDES crypto suite name to pylibsrtp profile constant.
+        Returns the appropriate SRTP_PROFILE_* value for Policy.
+        """
+        normalized = (suite or "").strip().upper().replace("-", "_")
+        if "AEAD_AES_256_GCM" in normalized:
+            return Policy.SRTP_PROFILE_AEAD_AES_256_GCM
+        if "AEAD_AES_128_GCM" in normalized:
+            return Policy.SRTP_PROFILE_AEAD_AES_128_GCM
+        if "AES_CM_128_HMAC_SHA1_32" in normalized or "AES128_CM_SHA1_32" in normalized:
+            return Policy.SRTP_PROFILE_AES128_CM_SHA1_32
+        # Default to AES128_CM_SHA1_80 for AES_CM_128_HMAC_SHA1_80 and unknown suites
+        return Policy.SRTP_PROFILE_AES128_CM_SHA1_80
+
     def decrypt_streams(
         self,
         mode: str,
@@ -172,7 +188,8 @@ class DecryptionService:
 
     def _decrypt_single_stream(self, stream: StreamMatch, crypto: SdesCryptoMaterial, output_file: Path) -> int:
         key_blob = crypto.master_key + crypto.master_salt
-        policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND)
+        srtp_profile = self._map_suite_to_srtp_profile(crypto.suite)
+        policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND, srtp_profile=srtp_profile)
         session = Session(policy)
 
         decrypted_count = 0
@@ -286,8 +303,16 @@ class DecryptionService:
         sessions: List[Session] = []
         for mat in materials:
             key_blob = mat.master_key + mat.master_salt
-            policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND)
+            srtp_profile = self._map_suite_to_srtp_profile(mat.suite)
+            policy = Policy(key=key_blob, ssrc_type=Policy.SSRC_ANY_INBOUND, srtp_profile=srtp_profile)
             sessions.append(Session(policy))
+            LOGGER.debug(
+                "Created SRTP session suite=%s srtp_profile=%s stream_id=%s",
+                mat.suite,
+                srtp_profile,
+                output_prefix,
+                extra={"category": "SDES_KEYS", "correlation_id": cid},
+            )
 
         tmp_out = output_dir / f"{output_prefix}-decrypted.pcap"
         writer = PcapWriter(str(tmp_out), append=False, sync=True)

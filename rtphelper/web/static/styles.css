@@ -978,25 +978,6 @@ button:disabled {
   width: auto;
 }
 
-.log-live-toggle {
-  display: inline-flex;
-  align-items: center;
-  flex-direction: row-reverse;
-  gap: 6px;
-  font-size: 12px;
-  color: #cbe1ff;
-  margin: 0;
-  background: transparent;
-  border: none;
-  padding: 0;
-}
-
-.log-live-toggle input[type="checkbox"] {
-  margin: 0;
-  width: 14px;
-  height: 14px;
-}
-
 .log {
   margin-top: 10px;
   padding: 10px;
@@ -1106,6 +1087,11 @@ button:disabled {
 
 .log-token-filter-yellow {
   color: #facc15;
+  font-weight: inherit;
+}
+
+.log-token-muted {
+  color: var(--muted);
   font-weight: inherit;
 }
 

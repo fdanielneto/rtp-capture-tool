@@ -104,8 +104,8 @@ function formatStructuredProjectMessage(message) {
     '<span class="log-token-yellow">[$1]</span>'
   );
   escaped = escaped.replace(
-    /\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
-    '<span class="log-token-yellow">[$1]</span>'
+    /\[(carrier[_-]to[_-]rtpengine|rtpengine[_-]to[_-]carrier|rtpengine[_-]to[_-]core|core[_-]to[_-]rtpengine|carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
+    '<span class="log-token-muted">[$1]</span>'
   );
   escaped = escaped.replace(
     /^(\s*)(LEG:\s*CARRIER\s*-\s*RTP ENGINE|LEG:\s*RTP ENGINE\s*-\s*CORE)/i,
@@ -113,7 +113,7 @@ function formatStructuredProjectMessage(message) {
   );
 
   escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
-  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-filter-yellow">FILTER:</span>`);
+  escaped = escaped.replace(/(^|[^A-Z])(FILTER:|Filter:)/g, (m, prefix, token) => `${prefix}<span class="log-token-filter-yellow">${token}</span>`);
   escaped = escaped.replace(
     /\b(packets=)(\d+)(\s+KEEP)\b/gi,
     '$1$2<span class="log-token-green">$3</span>'
@@ -126,6 +126,8 @@ function shouldKeepLineWhite(message) {
   const msg = String(message || "").trim();
   if (!msg) return false;
   if (/^=+\s*Step\s+[1-6]:.*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Phase\s+1:\s*Pre-filtering\s*\(count packets\)\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Phase\s+2:\s*Extract individual legs\s*=+\s*$/i.test(msg)) return true;
   if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
   if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
   if (/^=+\s*RTP Engine IP Detection\s*=+\s*$/i.test(msg)) return true;

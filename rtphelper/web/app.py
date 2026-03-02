@@ -8,7 +8,7 @@ import io
 import datetime as dt
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import shutil
@@ -65,7 +65,7 @@ CORRELATION_HEARTBEAT_SECONDS = max(
     5.0, float(os.environ.get("RTPHELPER_CORRELATION_HEARTBEAT_SECONDS", "10") or "10")
 )
 MAX_PARALLEL_FILTER_WORKERS = max(
-    1, int(os.environ.get("RTPHELPER_MAX_PARALLEL_FILTER_WORKERS", "10") or "10")
+    1, int(os.environ.get("RTPHELPER_MAX_PARALLEL_FILTER_WORKERS", "50") or "50")
 )
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -1530,9 +1530,32 @@ async def correlate(
             f"core_invite_packet={core_invite_packet} core_200ok_packet={core_200ok_packet}"
         )
         selected_crypto: List[SdesCryptoMaterial] = []
+        leg_encryption_status: Dict[str, bool] = {}
         crypto_warning: str | None = None
+        
+        # Try to extract crypto from all legs (Carrier + Core)
         try:
-            if invite_cipher_packet is not None and ok_200_cipher_packet is not None:
+            if (carrier_invite_packet is not None and carrier_200ok_packet is not None and
+                core_invite_packet is not None and core_200ok_packet is not None):
+                # We have all 4 legs - try to get all crypto materials
+                selected_crypto, leg_encryption_status = _select_all_legs_crypto(
+                    call,
+                    carrier_invite_packet,
+                    carrier_200ok_packet,
+                    core_invite_packet,
+                    core_200ok_packet,
+                )
+                if not selected_crypto:
+                    # Fall back to original logic
+                    if invite_cipher_packet is not None and ok_200_cipher_packet is not None:
+                        selected_crypto = _select_inline_crypto_for_packet_pair(
+                            call,
+                            invite_cipher_packet,
+                            ok_200_cipher_packet,
+                        )
+                    else:
+                        selected_crypto = _select_inline_crypto_for_direction(call, negotiation, direction)
+            elif invite_cipher_packet is not None and ok_200_cipher_packet is not None:
                 selected_crypto = _select_inline_crypto_for_packet_pair(
                     call,
                     invite_cipher_packet,
@@ -1678,12 +1701,35 @@ async def correlate(
             log_lines.append("INFO: Media does not appear encrypted. Files will be marked as no-decrypt-need.")
     elif selected_crypto:
         log_lines.append("INFO: SDES material selected for decrypt phase:")
-        for line in _selected_crypto_log_lines(
-            selected_crypto,
-            direction,
-            request_packet_number=invite_cipher_packet,
-            reply_packet_number=ok_200_cipher_packet,
-        ):
+        
+        # Determine appropriate labels based on number of materials
+        if len(selected_crypto) == 4:
+            # All 4 legs: Carrier INVITE, Carrier 200 OK, Core INVITE, Core 200 OK
+            labels = ["carrier_request", "carrier_reply", "core_request", "core_reply"]
+            packet_numbers = [carrier_invite_packet, carrier_200ok_packet, core_invite_packet, core_200ok_packet]
+        elif len(selected_crypto) == 2:
+            # Original behavior: request/reply
+            labels = ["request", "reply"]
+            packet_numbers = [invite_cipher_packet, ok_200_cipher_packet]
+        else:
+            # Fallback for other cases
+            labels = [f"material_{i+1}" for i in range(len(selected_crypto))]
+            packet_numbers = [None] * len(selected_crypto)
+        
+        # Log encryption status per leg if available
+        if leg_encryption_status:
+            encrypted_legs = [leg for leg, encrypted in leg_encryption_status.items() if encrypted]
+            unencrypted_legs = [leg for leg, encrypted in leg_encryption_status.items() if not encrypted]
+            if encrypted_legs:
+                log_lines.append(f"INFO: Encrypted legs detected: {', '.join(encrypted_legs)}")
+            if unencrypted_legs:
+                log_lines.append(f"INFO: Unencrypted legs detected (RTP/AVP): {', '.join(unencrypted_legs)}")
+        
+        for idx, material in enumerate(selected_crypto):
+            role = labels[idx] if idx < len(labels) else f"material_{idx + 1}"
+            packet_number = packet_numbers[idx] if idx < len(packet_numbers) else None
+            packet_fragment = f" packet_number={packet_number}" if packet_number is not None else ""
+            line = f"direction={direction} role={role} suite={material.suite} inline={_inline_from_material(material)}{packet_fragment}"
             log_lines.append(f"INFO: {line}")
             LOGGER.info(
                 "Decrypt material selected %s",
@@ -1783,6 +1829,7 @@ async def correlate(
     filtered_dir = session.base_dir / "filtered"
     filtered_dir.mkdir(parents=True, exist_ok=True)
     filtered_files: List[Path] = []
+    leg_file_metadata: Dict[Path, Dict[str, Any]] = {}  # Maps file path -> leg metadata (leg_label, step, etc)
     
     # Track filter statistics per instance
     instance_filter_stats: Dict[str, Dict[str, int]] = {}  # instance_id -> {files_checked, files_filtered}
@@ -1806,90 +1853,252 @@ async def correlate(
                 if filtered:
                     instance_filter_stats[inst_id]["files_filtered"] += 1
 
-    # Determine number of parallel workers
-    max_workers = min(MAX_PARALLEL_FILTER_WORKERS, len(media_pcaps), os.cpu_count() or 4)
-    add_log_line(f"INFO: Processing {len(media_pcaps)} capture files...")
-    add_log_line("INFO: Analyzing packets and building filters for each RTP Engine instance...")
+    # Build filters once for all instances (will be adjusted per-instance with actual IPs)
+    add_log_line(f"INFO: Processing {len(media_pcaps)} capture files by leg...")
+    add_log_line("INFO: Each leg filter will be applied against all capture files")
     add_log_line("INFO: This may take a few moments - results will appear as processing completes")
     
-    # Process files in parallel using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        futures = {}
-        for pcap_idx, pcap_file in enumerate(media_pcaps, start=1):
+    # Get base filter steps (without instance-specific IPs yet)
+    if not correlation_ctx:
+        log_lines.append("ERROR: No correlation context available for filter building")
+        return {"call_id": call.call_id, "message": "No correlation context", "log_tail": log_lines}
+    
+    base_steps = build_tshark_filters(correlation_ctx, None, for_count=True)
+    
+    # Determine number of parallel workers
+    max_workers = 10
+    
+    # Build combined filter (all legs with OR) for pre-filtering
+    available_base_filters = []
+    for step_info in base_steps:
+        if step_info.get("available") and step_info.get("tshark_filter"):
+            available_base_filters.append(step_info["tshark_filter"])
+    
+    if not available_base_filters:
+        log_lines.append("ERROR: No available filters could be built")
+        return {"call_id": call.call_id, "message": "No available filters", "log_tail": log_lines}
+    
+    combined_filter = " || ".join(f"({f})" for f in available_base_filters)
+    
+    # Phase 1: Pre-filtering - count packets with combined filter to identify files with traffic
+    add_log_line(_format_log_banner("Phase 1: Pre-filtering (count packets)"))
+    add_log_line(f"INFO: Scanning {len(media_pcaps)} capture files with combined filter...")
+    add_log_line(f"INFO: Combined Filter: {combined_filter}")
+    add_log_line(f"INFO: This identifies which files contain relevant RTP packets (count > 1)")
+    
+    files_with_traffic: Dict[Path, int] = {}  # file -> packet_count
+    
+    # Count packets in parallel
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(media_pcaps))) as count_executor:
+            count_futures = {}
+            for pcap_file in media_pcaps:
+                instance_id = _extract_rtp_engine_instance(pcap_file.name)
+                rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
+                
+                # Build instance-specific combined filter if needed
+                file_combined_filter = combined_filter
+                if rtpengine_actual_ip:
+                    instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=True)
+                    instance_filters = [s["tshark_filter"] for s in instance_steps if s.get("available") and s.get("tshark_filter")]
+                    if instance_filters:
+                        file_combined_filter = " || ".join(f"({f})" for f in instance_filters)
+                
+                future = count_executor.submit(_tshark_count_matches, pcap_file, file_combined_filter, call_cid)
+                count_futures[future] = pcap_file
+            
+            # Collect count results
+            for future in as_completed(count_futures):
+                pcap_file = count_futures[future]
+                try:
+                    count = future.result()
+                    if count > 1:
+                        files_with_traffic[pcap_file] = count
+                        add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
+                    else:
+                        add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP")
+                except Exception as exc:
+                    add_log_line(f"  ERROR: {pcap_file.name}: count failed - {exc}")
+                
+    else:
+        # Sequential count if only 1 worker
+        for pcap_file in media_pcaps:
             instance_id = _extract_rtp_engine_instance(pcap_file.name)
             rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
             
-            future = executor.submit(
-                _process_single_pcap_with_filter,
-                pcap_file,
-                pcap_idx,
-                len(media_pcaps),
-                instance_id,
-                rtpengine_actual_ip,
-                correlation_ctx,
-                filtered_dir,
-                call_cid,
-            )
-            futures[future] = (pcap_file, pcap_idx, instance_id)
+            file_combined_filter = combined_filter
+            if rtpengine_actual_ip:
+                instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=True)
+                instance_filters = [s["tshark_filter"] for s in instance_steps if s.get("available") and s.get("tshark_filter")]
+                if instance_filters:
+                    file_combined_filter = " || ".join(f"({f})" for f in instance_filters)
+            
+            try:
+                count = _tshark_count_matches(pcap_file, file_combined_filter, call_cid)
+                if count > 1:
+                    files_with_traffic[pcap_file] = count
+                    add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
+                else:
+                    add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP")
+            except Exception as exc:
+                add_log_line(f"  ERROR: {pcap_file.name}: count failed - {exc}")
+    
+    if not files_with_traffic:
+        add_log_line("ERROR: No files contain RTP packets matching the filters (all counts <= 1)")
+        log_lines.append("ERROR: No RTP/SRTP streams found in any capture file")
+        return {"call_id": call.call_id, "message": "No RTP packets found", "log_tail": log_lines}
+    
+    add_log_line(f"INFO: Pre-filtering complete: {len(files_with_traffic)}/{len(media_pcaps)} files contain traffic")
+    
+    # Phase 2: Process individual legs on files with traffic
+    add_log_line(_format_log_banner("Phase 2: Extract individual legs"))
+    
+    # Process by leg (not by file)
+    leg_labels = {
+        1: "carrier_to_rtpengine",
+        2: "rtpengine_to_carrier",
+        3: "rtpengine_to_core",
+        4: "core_to_rtpengine",
+    }
+    
+    # Store extracted files per leg
+    leg_extracted_files: Dict[str, List[Path]] = {label: [] for label in leg_labels.values()}
+    leg_total_packets: Dict[str, int] = {label: 0 for label in leg_labels.values()}
+    leg_completed_tasks: Dict[str, int] = {label: 0 for label in leg_labels.values()}
+    leg_pending_tasks: Dict[str, int] = {label: 0 for label in leg_labels.values()}
+    
+    max_workers = min(MAX_PARALLEL_FILTER_WORKERS, len(media_pcaps), os.cpu_count() or 4)
+    
+    # Create global executor for streaming pipeline - all legs process simultaneously
+    add_log_line("INFO: Starting streaming pipeline - all legs will process in parallel")
+    add_log_line(f"INFO: Phase 2 workers configured: {max_workers}")
+    
+    # Build example extraction filters for logging (with first detected IP if available)
+    # These are for display only - actual filters are rebuilt per-file with correct IPs
+    first_rtpengine_ip = next(iter(rtpengine_ip_per_instance.values())) if rtpengine_ip_per_instance else None
+    extract_steps_example = build_tshark_filters(correlation_ctx, first_rtpengine_ip, for_count=False)
+    # Create lookup map by step number for easy access
+    extract_steps_map = {int(s["step"]): s for s in extract_steps_example}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit ALL tasks immediately (streaming pipeline)
+        # Tasks from all 4 legs compete for workers - no waiting between legs
+        all_futures = {}
         
-        # Collect results as they complete
-        completed = 0
-        for future in as_completed(futures):
-            pcap_file, pcap_idx, instance_id = futures[future]
-            completed += 1
+        for step_info in base_steps:
+            step_num = int(step_info["step"])
+            leg_key = str(step_info["leg_key"])
+            leg_label = leg_labels.get(step_num, f"leg{step_num}")
+            base_available = bool(step_info["available"])
+            
+            if not base_available:
+                add_log_line(f"INFO: Leg {leg_label} (step {step_num}): SKIPPED - {step_info.get('reason', 'unavailable')}")
+                continue
+            
+            # Log filter for this leg (use extraction filter example, not count filter)
+            extract_step = extract_steps_map.get(step_num, step_info)
+            filter_expr = extract_step.get("tshark_filter", "(no filter)")
+            add_log_line(f"INFO: [{leg_label}] Filter: {filter_expr}")
+            
+            # Submit only files with traffic (from phase 1 pre-filtering)
+            for pcap_file in files_with_traffic.keys():
+                instance_id = _extract_rtp_engine_instance(pcap_file.name)
+                rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
+
+                add_log_line(
+                    f"INFO: Queued [{leg_label}] for processing file {pcap_file.name}"
+                )
+                
+                future = executor.submit(
+                    _process_single_leg_filter,
+                    pcap_file,
+                    step_info,
+                    leg_label,
+                    step_num,
+                    instance_id,
+                    rtpengine_actual_ip,
+                    correlation_ctx,
+                    filtered_dir,
+                    call_cid,
+                    add_log_line,
+                )
+                all_futures[future] = (leg_label, pcap_file, instance_id)
+                leg_pending_tasks[leg_label] += 1
+        
+        # Process results as they complete (streaming)
+        total_tasks = len(all_futures)
+        completed_tasks = 0
+        
+        add_log_line(f"INFO: Pipeline active with {total_tasks} total tasks across {len([k for k,v in leg_pending_tasks.items() if v > 0])} legs")
+        add_log_line(f"INFO: Each task runs tshark to extract packets from PCAP files (may take 5-30 seconds per file)")
+        add_log_line(f"INFO: Results will appear as tasks complete...")
+
+        for future in as_completed(all_futures):
+            leg_label, pcap_file, instance_id = all_futures[future]
+            completed_tasks += 1
+            leg_completed_tasks[leg_label] += 1
             
             try:
                 result = future.result()
                 
                 if result["status"] == "success":
-                    # Log combined filter
-                    add_log_line(f"COMBINED FILTER: {result['filter']}")
-                    
-                    # Log processing info
-                    instance_label = f"instance={instance_id}" if instance_id else "no_instance"
-                    rtpengine_ip_used = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
-                    ip_label = f"ip={rtpengine_ip_used}" if rtpengine_ip_used else "ip=sdp_announced"
-                    add_log_line(
-                        f"  Scan complete: file={completed}/{len(media_pcaps)} name={pcap_file.name} "
-                        f"{instance_label} {ip_label}"
-                    )
-                    add_log_line(f"  File: {pcap_file.name} -> packets={result['packets']} KEEP")
-                    add_log_line(f"  SUCCESS: {pcap_file.name} filtered (packets={result['packets']})")
-                    
                     with log_lock:
-                        filtered_files.append(result["output"])
+                        leg_extracted_files[leg_label].append(result["output"])
+                        leg_total_packets[leg_label] += result["packets"]
                     
+                    add_log_line(
+                        f"  [{completed_tasks}/{total_tasks}] {leg_label}: {pcap_file.name} -> "
+                        f"{result['output'].name} (packets={result['packets']}) "
+                        f"[{leg_label} progress: {leg_completed_tasks[leg_label]}/{leg_pending_tasks[leg_label]}]"
+                    )
                     update_instance_stats(instance_id, checked=True, filtered=True)
                     
                 elif result["status"] == "skipped":
-                    reason = result.get("reason", "unknown")
-                    if reason == "no_filters":
-                        add_log_line(
-                            f"  File {completed}/{len(media_pcaps)}: {pcap_file.name} -> SKIP (no available filters)"
-                        )
-                    else:
-                        # Log combined filter even for skipped files
-                        if "filter" in result:
-                            add_log_line(f"COMBINED FILTER: {result['filter']}")
-                        
-                        instance_label = f"instance={instance_id}" if instance_id else "no_instance"
-                        rtpengine_ip_used = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
-                        ip_label = f"ip={rtpengine_ip_used}" if rtpengine_ip_used else "ip=sdp_announced"
-                        add_log_line(
-                            f"  Scan complete: file={completed}/{len(media_pcaps)} name={pcap_file.name} "
-                            f"{instance_label} {ip_label}"
-                        )
-                        add_log_line(f"  File: {pcap_file.name} -> packets={result['packets']} SKIP")
-                        
-                        update_instance_stats(instance_id, checked=True, filtered=False)
-                        
+                    # File has no packets for this leg - normal, don't log each one
+                    pass
                 else:  # error
-                    add_log_line(f"  ERROR: {pcap_file.name} processing failed: {result.get('error', 'unknown error')}")
-                    update_instance_stats(instance_id, checked=True, filtered=False)
+                    add_log_line(
+                        f"  [{completed_tasks}/{total_tasks}] ERROR: {leg_label} from {pcap_file.name}: "
+                        f"{result.get('error', 'unknown')}"
+                    )
                     
             except Exception as exc:
-                add_log_line(f"  ERROR: {pcap_file.name} unexpected error: {exc}")
+                add_log_line(f"  [{completed_tasks}/{total_tasks}] ERROR: {leg_label} from {pcap_file.name}: {exc}")
+            
+            # Check if this leg is complete
+            if leg_completed_tasks[leg_label] == leg_pending_tasks[leg_label]:
+                if leg_extracted_files[leg_label]:
+                    add_log_line(
+                        f"INFO: Leg {leg_label} COMPLETE: extracted from {len(leg_extracted_files[leg_label])} "
+                        f"files (total packets={leg_total_packets[leg_label]})"
+                    )
+                    
+                    # Merge immediately for this leg
+                    add_log_line(f"INFO: Merging {leg_label}...")
+                    final_leg_file = filtered_dir / f"{leg_label}-merged.pcap"
+                    if len(leg_extracted_files[leg_label]) == 1:
+                        # Only one file, just copy
+                        shutil.copy2(leg_extracted_files[leg_label][0], final_leg_file)
+                    else:
+                        # Merge multiple files
+                        merge_pcaps(final_leg_file, leg_extracted_files[leg_label])
+                    
+                    with log_lock:
+                        filtered_files.append(final_leg_file)
+                        # Store metadata for decryption
+                        leg_file_metadata[final_leg_file] = {
+                            "leg_label": leg_label,
+                            "leg_key": f"leg_{leg_label}",
+                            "step": list(leg_labels.keys())[list(leg_labels.values()).index(leg_label)],
+                            "packets": leg_total_packets[leg_label],
+                        }
+                    
+                    add_log_line(f"INFO: Created final file: {final_leg_file.name}")
+                else:
+                    add_log_line(f"INFO: Leg {leg_label} COMPLETE: no packets found across all files")
+    
+    # All legs complete - pipeline finished
+    add_log_line(f"INFO: Streaming pipeline complete - {len(filtered_files)} final leg files created")
     
     # Log per-instance statistics
     if instance_filter_stats:
@@ -1978,6 +2187,7 @@ async def correlate(
 
     combined_dir.mkdir(parents=True, exist_ok=True)
     log_lines.append(_format_log_banner("Step 4: Build media files"))
+    log_lines.append(f"INFO: Merging {len(filtered_files)} leg file(s) into media_raw.pcap...")
     media_encrypted_pcap = combined_dir / "media_raw.pcap"
     merge_pcaps(media_encrypted_pcap, filtered_files)
     log_lines.append(f"media_raw.pcap created from {len(filtered_files)} filtered files")
@@ -1999,56 +2209,98 @@ async def correlate(
     no_decrypt_count = 0
     decrypted_files: List[Path] = []
     no_decrypt_files: List[Path] = []
+    
+    # Map leg labels to crypto material indices and encryption status
+    leg_to_crypto_index = {
+        "carrier_to_rtpengine": 0,
+        "rtpengine_to_carrier": 1,
+        "rtpengine_to_core": 2,
+        "core_to_rtpengine": 3,
+    }
+
+    leg_expected_media_security: Dict[str, str] = {
+        "carrier_to_rtpengine": "RTP/SAVP" if leg_encryption_status.get("carrier_to_rtpengine", encrypted_expected) else "RTP/AVP",
+        "rtpengine_to_carrier": "RTP/SAVP" if leg_encryption_status.get("rtpengine_to_carrier", encrypted_expected) else "RTP/AVP",
+        "rtpengine_to_core": "RTP/SAVP" if leg_encryption_status.get("rtpengine_to_core", encrypted_expected) else "RTP/AVP",
+        "core_to_rtpengine": "RTP/SAVP" if leg_encryption_status.get("core_to_rtpengine", encrypted_expected) else "RTP/AVP",
+    }
+    
+    log_lines.append(f"INFO: Processing {len(filtered_files)} leg file(s) for decryption/validation...")
+    
     for f in filtered_files:
         prefix = f.stem.replace("-filtered", "")
-        try:
-            if direction == "outbound":
-                if encrypted_expected:
-                    # Outbound: when SIP negotiation indicates SRTP, always attempt decrypt.
-                    # This avoids false negatives from dissector-based encrypted detection.
-                    log_lines.append(
-                        f"{f.name}: encrypted_detected=True (from SIP negotiation); forcing decrypt attempt"
-                    )
-                    result = DECRYPTION_SERVICE.decrypt_or_copy_pcap(
-                        call=call,
-                        input_pcap=f,
-                        output_dir=session.decrypted_dir,
-                        output_prefix=prefix,
-                        crypto_materials=selected_crypto,
-                        encrypted_expected=True,
-                    )
-                else:
-                    file_encrypted = _detect_encrypted_filtered_file(
-                        f, default_encrypted=encrypted_expected, correlation_id=call_cid
-                    )
-                    log_lines.append(f"{f.name}: encrypted_detected={file_encrypted}")
-                    if file_encrypted:
-                        result = DECRYPTION_SERVICE.decrypt_or_copy_pcap(
-                            call=call,
-                            input_pcap=f,
-                            output_dir=session.decrypted_dir,
-                            output_prefix=prefix,
-                            crypto_materials=selected_crypto,
-                            encrypted_expected=True,
-                        )
-                    else:
-                        out = session.decrypted_dir / f"{prefix}-no-decrypt-need.pcap"
-                        shutil.copy2(f, out)
-                        result = DecryptionResult(
-                            stream_id=prefix,
-                            status="copied",
-                            message="Stream not encrypted; copied as no-decrypt-need",
-                            output_file=out,
-                        )
+
+        # Check if this file has leg metadata
+        leg_meta = leg_file_metadata.get(f)
+        leg_label = leg_meta["leg_label"] if leg_meta else prefix
+        expected_media_security = leg_expected_media_security.get(
+            leg_label,
+            "RTP/SAVP" if encrypted_expected else "RTP/AVP",
+        )
+        leg_is_savp = expected_media_security == "RTP/SAVP"
+
+        leg_specific_crypto = None
+        key_status = "n/a"
+        key_suite = "n/a"
+        crypto_to_use: List[SdesCryptoMaterial] = []
+
+        if leg_is_savp:
+            crypto_idx = leg_to_crypto_index.get(leg_label)
+            if selected_crypto and len(selected_crypto) == 4 and crypto_idx is not None and crypto_idx < len(selected_crypto):
+                leg_specific_crypto = [selected_crypto[crypto_idx]]
+                crypto_to_use = leg_specific_crypto
+                key_status = "present"
+                key_suite = selected_crypto[crypto_idx].suite
+            elif selected_crypto:
+                crypto_to_use = list(selected_crypto)
+                key_status = "present"
+                key_suite = ",".join(sorted({m.suite for m in selected_crypto}))
             else:
-                # Inbound: keep existing behavior.
+                key_status = "missing"
+
+        if expected_media_security == "RTP/AVP":
+            action = "copy-no-decrypt"
+        elif leg_is_savp and key_status == "present":
+            action = "decrypt"
+        else:
+            action = "skip-decrypt"
+
+        log_lines.append(
+            f"INFO: leg={leg_label} signaling={expected_media_security} key={key_status} suite={key_suite} action={action}"
+        )
+        LOGGER.info(
+            "Leg decrypt decision leg=%s signaling=%s key=%s suite=%s action=%s source_file=%s",
+            leg_label,
+            expected_media_security,
+            key_status,
+            key_suite,
+            action,
+            f.name,
+            extra={"category": "SRTP_DECRYPT", "correlation_id": call_cid},
+        )
+        
+        try:
+            if action in {"copy-no-decrypt", "skip-decrypt"}:
+                out = session.decrypted_dir / f"{prefix}-no-decrypt-need.pcap"
+                shutil.copy2(f, out)
+                if action == "copy-no-decrypt":
+                    message = f"Leg {leg_label} signaling RTP/AVP; copied without decrypt"
+                else:
+                    message = f"Leg {leg_label} signaling RTP/SAVP but key missing; decrypt skipped"
+                result = DecryptionResult(
+                    stream_id=prefix,
+                    status="copied",
+                    message=message,
+                    output_file=out,
+                )
+            else:
                 result = DECRYPTION_SERVICE.decrypt_or_copy_pcap(
                     call=call,
                     input_pcap=f,
                     output_dir=session.decrypted_dir,
                     output_prefix=prefix,
-                    crypto_materials=selected_crypto,
-                    encrypted_expected=encrypted_expected,
+                    crypto_materials=crypto_to_use,
+                    encrypted_expected=leg_is_savp,
                 )
         except Exception as exc:
             fallback = session.decrypted_dir / f"{prefix}-no-decrypt-need.pcap"
@@ -2087,6 +2339,7 @@ async def correlate(
         if direction == "outbound":
             # Outbound required logic:
             # media_raw = filtered + no-decrypt-need
+            log_lines.append(f"INFO: Merging filtered + no-decrypt-need files into media_raw.pcap...")
             merge_pcaps(media_encrypted_pcap, list(filtered_files) + list(no_decrypt_files))
             log_lines.append(
                 f"media_raw.pcap rebuilt from filtered({len(filtered_files)}) + no-decrypt-need({len(no_decrypt_files)})"
@@ -2100,6 +2353,7 @@ async def correlate(
                 for name in no_decrypt_names:
                     log_lines.append(f"- {name}")
             # media_decrypted = decrypted + no-decrypt-need
+            log_lines.append(f"INFO: Merging decrypted + no-decrypt-need files into media_decrypted.pcap...")
             merge_pcaps(media_decrypted_pcap, list(decrypted_files) + list(no_decrypt_files))
             log_lines.append(
                 f"media_decrypted.pcap created from decrypted({len(decrypted_files)}) + no-decrypt-need({len(no_decrypt_files)})"
@@ -2114,6 +2368,7 @@ async def correlate(
                     log_lines.append(f"- {name}")
         else:
             # Inbound: keep existing behavior.
+            log_lines.append(f"INFO: Merging {len(processed_files)} processed file(s) into media_decrypted.pcap...")
             merge_pcaps(media_decrypted_pcap, processed_files)
             log_lines.append("media_decrypted.pcap created")
             used_names = [p.name for p in processed_files]
@@ -2121,6 +2376,7 @@ async def correlate(
                 log_lines.append("Processed files merged into media_decrypted.pcap:")
                 for name in used_names:
                     log_lines.append(f"- {name}")
+        log_lines.append(f"INFO: Merging SIP + media_decrypted into final output...")
         merge_pcaps(sip_plus_media_decrypted_pcap, [upload_path, media_decrypted_pcap])
         log_lines.append("SIP_plus_media_decrypted.pcap created")
         log_lines.append("SIP merge inputs:")
@@ -2552,6 +2808,106 @@ def _message_by_packet(call: SipCall, packet_number: int) -> SipMessage | None:
     for msg in call.messages:
         if msg.packet_number == packet_number:
             return msg
+    return None
+
+
+def _select_all_legs_crypto(
+    call: SipCall,
+    carrier_invite_packet: int | None,
+    carrier_200ok_packet: int | None,
+    core_invite_packet: int | None,
+    core_200ok_packet: int | None,
+) -> tuple[List[SdesCryptoMaterial], Dict[str, bool]]:
+    """
+    Select SDES materials from all available legs (Carrier + Core).
+    
+    Returns:
+        - List of SdesCryptoMaterial from all legs
+        - Dict mapping leg identifiers to encryption status:
+          {'carrier_to_rtpengine': bool, 'rtpengine_to_carrier': bool, 'rtpengine_to_core': bool, 'core_to_rtpengine': bool}
+    """
+    all_materials: List[SdesCryptoMaterial] = []
+    leg_encryption: Dict[str, bool] = {
+        'carrier_to_rtpengine': False,
+        'rtpengine_to_carrier': False,
+        'rtpengine_to_core': False,
+        'core_to_rtpengine': False,
+    }
+    
+    # Try to extract Carrier leg crypto (carrier INVITE + 200 OK to carrier)
+    if carrier_invite_packet is not None and carrier_200ok_packet is not None:
+        try:
+            carrier_invite_msg = _message_by_packet(call, carrier_invite_packet)
+            carrier_200ok_msg = _message_by_packet(call, carrier_200ok_packet)
+            
+            if carrier_invite_msg and carrier_200ok_msg:
+                # Check if carrier legs are encrypted
+                carrier_invite_proto = _get_audio_protocol(carrier_invite_msg)
+                carrier_200ok_proto = _get_audio_protocol(carrier_200ok_msg)
+                
+                carrier_invite_encrypted = 'SAVP' in (carrier_invite_proto or '').upper()
+                carrier_200ok_encrypted = 'SAVP' in (carrier_200ok_proto or '').upper()
+                
+                leg_encryption['carrier_to_rtpengine'] = carrier_invite_encrypted
+                leg_encryption['rtpengine_to_carrier'] = carrier_200ok_encrypted
+                
+                # Extract crypto materials if encrypted
+                if carrier_invite_encrypted or carrier_200ok_encrypted:
+                    invite_cryptos = _collect_sdes_materials(carrier_invite_msg)
+                    ok_cryptos = _collect_sdes_materials(carrier_200ok_msg)
+                    
+                    if invite_cryptos and ok_cryptos:
+                        # Find common suite
+                        invite_by_suite = {c.suite: c for c in invite_cryptos}
+                        common = [c for c in ok_cryptos if c.suite in invite_by_suite]
+                        if common:
+                            selected_ok = common[0]
+                            selected_invite = invite_by_suite[selected_ok.suite]
+                            all_materials.extend([selected_invite, selected_ok])
+        except Exception:
+            pass
+    
+    # Try to extract Core leg crypto (core INVITE + 200 OK from core)
+    if core_invite_packet is not None and core_200ok_packet is not None:
+        try:
+            core_invite_msg = _message_by_packet(call, core_invite_packet)
+            core_200ok_msg = _message_by_packet(call, core_200ok_packet)
+            
+            if core_invite_msg and core_200ok_msg:
+                # Check if core legs are encrypted
+                core_invite_proto = _get_audio_protocol(core_invite_msg)
+                core_200ok_proto = _get_audio_protocol(core_200ok_msg)
+                
+                core_invite_encrypted = 'SAVP' in (core_invite_proto or '').upper()
+                core_200ok_encrypted = 'SAVP' in (core_200ok_proto or '').upper()
+                
+                leg_encryption['rtpengine_to_core'] = core_invite_encrypted
+                leg_encryption['core_to_rtpengine'] = core_200ok_encrypted
+                
+                # Extract crypto materials if encrypted
+                if core_invite_encrypted or core_200ok_encrypted:
+                    invite_cryptos = _collect_sdes_materials(core_invite_msg)
+                    ok_cryptos = _collect_sdes_materials(core_200ok_msg)
+                    
+                    if invite_cryptos and ok_cryptos:
+                        # Find common suite
+                        invite_by_suite = {c.suite: c for c in invite_cryptos}
+                        common = [c for c in ok_cryptos if c.suite in invite_by_suite]
+                        if common:
+                            selected_ok = common[0]
+                            selected_invite = invite_by_suite[selected_ok.suite]
+                            all_materials.extend([selected_invite, selected_ok])
+        except Exception:
+            pass
+    
+    return all_materials, leg_encryption
+
+
+def _get_audio_protocol(msg: SipMessage) -> str | None:
+    """Extract audio protocol (e.g., RTP/AVP, RTP/SAVP) from first audio media section."""
+    for section in msg.media_sections:
+        if section.media_type == 'audio' and section.protocol:
+            return section.protocol
     return None
 
 
@@ -3071,83 +3427,92 @@ def _run_with_heartbeat(
     return outcome.get("result")
 
 
-def _process_single_pcap_with_filter(
+def _process_single_leg_filter(
     pcap_file: Path,
-    pcap_idx: int,
-    total_pcaps: int,
+    step_info: Dict[str, Any],
+    leg_label: str,
+    step_num: int,
     instance_id: Optional[str],
     rtpengine_actual_ip: Optional[str],
     correlation_ctx: Optional[CorrelationContext],
     filtered_dir: Path,
     call_cid: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Process a single PCAP file with filters in parallel.
-    Thread-safe function that builds filters, counts packets, and writes filtered output.
+    Process a single leg filter against a single PCAP file.
+    Thread-safe function that applies one leg filter to one file.
     
     Returns:
-        Dictionary with processing results for aggregation
+        Dictionary with processing results
     """
     try:
-        # Build filters for this specific instance
-        if correlation_ctx:
+        # Rebuild filter with instance-specific IP if needed
+        if rtpengine_actual_ip:
             steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip)
+            # Find matching step
+            matching_step = None
+            for s in steps:
+                if int(s["step"]) == step_num:
+                    matching_step = s
+                    break
+            if not matching_step or not matching_step.get("available"):
+                return {
+                    "status": "skipped",
+                    "reason": "filter_unavailable_for_instance",
+                }
+            filter_expr = str(matching_step.get("tshark_filter") or "")
         else:
-            steps = []
+            filter_expr = str(step_info.get("tshark_filter") or "")
         
-        # Collect available filters for this file
-        available_filters: List[Tuple[int, str, str]] = []
-        for step in steps:
-            step_num = int(step["step"])
-            leg_key = str(step["leg_key"])
-            available = bool(step["available"])
-            filter_expr = str(step.get("tshark_filter") or "")
-            if available and filter_expr:
-                available_filters.append((step_num, leg_key, filter_expr))
-        
-        if not available_filters:
+        if not filter_expr:
             return {
                 "status": "skipped",
-                "reason": "no_filters",
-                "file": pcap_file,
-                "instance_id": instance_id,
-                "packets": 0,
+                "reason": "no_filter",
             }
+
+        if progress_cb:
+            progress_cb(f"INFO: Checking filter [{leg_label}] on file {pcap_file.name}")
         
-        # Combine filters with OR
-        combined_filter = " || ".join(f"({filter_expr})" for _, _, filter_expr in available_filters)
+        # Count packets for this leg in this file
+        count_started = time.monotonic()
+        if progress_cb:
+            progress_cb(f"INFO: [{leg_label}] Starting subprocess (count) on {pcap_file.name}")
+        pkt_count = _tshark_count_matches(pcap_file, filter_expr, call_cid)
+        if progress_cb:
+            progress_cb(
+                f"INFO: [{leg_label}] Finished subprocess (count) on {pcap_file.name} "
+                f"(packets={pkt_count}, elapsed={time.monotonic() - count_started:.1f}s)"
+            )
         
-        # Count matching packets
-        pkt_count = _tshark_count_matches(pcap_file, combined_filter, call_cid)
-        
-        if pkt_count <= 1:
+        if pkt_count == 0:
             return {
                 "status": "skipped",
                 "reason": "no_packets",
-                "file": pcap_file,
-                "instance_id": instance_id,
-                "packets": pkt_count,
-                "filter": combined_filter,
+                "packets": 0,
             }
         
-        # Write filtered PCAP
-        out_file = filtered_dir / f"combined-or-{pcap_file.stem}-filtered.pcap"
-        _tshark_write_filtered(pcap_file, combined_filter, out_file, call_cid)
+        # Extract this leg from this file
+        out_file = filtered_dir / f"{leg_label}-{pcap_file.stem}.pcap"
+        write_started = time.monotonic()
+        if progress_cb:
+            progress_cb(f"INFO: [{leg_label}] Starting subprocess (write) on {pcap_file.name}")
+        _tshark_write_filtered(pcap_file, filter_expr, out_file, call_cid)
+        if progress_cb:
+            progress_cb(
+                f"INFO: [{leg_label}] Finished subprocess (write) on {pcap_file.name} "
+                f"(output={out_file.name}, elapsed={time.monotonic() - write_started:.1f}s)"
+            )
         
         return {
             "status": "success",
-            "file": pcap_file,
             "output": out_file,
-            "instance_id": instance_id,
             "packets": pkt_count,
-            "filter": combined_filter,
         }
         
     except Exception as exc:
         return {
             "status": "error",
-            "file": pcap_file,
-            "instance_id": instance_id,
             "error": str(exc),
         }
 
