@@ -159,7 +159,14 @@ class RpcapClient:
             self._send(RPCAP_MSG_STARTCAP_REQ, 0, payload_to_try)
             msg_type, value, payload = self._recv_msg()
             if msg_type == RPCAP_MSG_STARTCAP_REPLY:
-                _bufsize, portdata = unpack_startcap_reply(payload)
+                bufsize, portdata = unpack_startcap_reply(payload)
+                LOGGER.info(
+                    "RPCAP server buffer size host=%s bufsize=%s bytes (%.2f MB)",
+                    self._host,
+                    bufsize,
+                    bufsize / (1024 * 1024),
+                    extra={"category": "CAPTURE"},
+                )
                 # In passive mode, rpcapd opens a separate TCP port for the data stream.
                 if portdata:
                     data_sock = socket.create_connection((self._host, int(portdata)), timeout=self._timeout)

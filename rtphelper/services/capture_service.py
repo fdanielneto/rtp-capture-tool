@@ -28,6 +28,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_ROLLING_PCAP_MAX_BYTES = 500 * 1000 * 1000
 DEFAULT_ROLLING_PCAP_MAX_SECONDS = 0
 DEFAULT_SNAPLEN = 262144
+DEFAULT_READ_TIMEOUT_MS = int(os.environ.get("RTPHELPER_RPCAP_READ_TIMEOUT_MS", "1000"))
 LIVE_UPLOAD_ROLLED_SIZE_MARGIN_BYTES = 1 * 1024 * 1024
 REACHABILITY_TTL_SECONDS = 30
 REACHABILITY_MAX_WORKERS = 16
@@ -1908,7 +1909,7 @@ class CaptureService:
         # Many rpcapd implementations expect the filter to be included in STARTCAP.
         client.start_capture(
             snaplen=DEFAULT_SNAPLEN,
-            read_timeout_ms=1000,
+            read_timeout_ms=DEFAULT_READ_TIMEOUT_MS,
             promisc=True,
             filter_expr=session.bpf_filter,
         )

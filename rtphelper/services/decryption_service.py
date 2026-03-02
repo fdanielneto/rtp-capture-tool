@@ -233,16 +233,23 @@ class DecryptionService:
                         )
                         continue
 
+                    # Preserve original timestamp before modification
+                    original_time = packet.time
+
                     packet[UDP].remove_payload()
                     packet[UDP].add_payload(Raw(load=decrypted_payload))
+                    # Force checksums to 0 (offload simulation) instead of deleting
                     if hasattr(packet[IP], "len"):
                         del packet[IP].len
                     if hasattr(packet[IP], "chksum"):
-                        del packet[IP].chksum
+                        packet[IP].chksum = 0
                     if hasattr(packet[UDP], "len"):
                         del packet[UDP].len
                     if hasattr(packet[UDP], "chksum"):
-                        del packet[UDP].chksum
+                        packet[UDP].chksum = 0
+
+                    # Restore original timestamp
+                    packet.time = original_time
                     writer.write(packet)
                     decrypted_count += 1
 
@@ -327,23 +334,30 @@ class DecryptionService:
                         payload = bytes(packet[UDP][Raw].load)
                         if len(payload) >= 12 and (payload[0] >> 6) == 2:
                             total_rtp += 1
+                            # Preserve original timestamp before modification
+                            original_time = packet.time
+
                             for sess in sessions:
                                 try:
                                     decrypted_payload = sess.unprotect(payload)
                                     packet[UDP].remove_payload()
                                     packet[UDP].add_payload(Raw(load=decrypted_payload))
+                                    # Force checksums to 0 (offload simulation) instead of deleting
                                     if hasattr(packet[IP], "len"):
                                         del packet[IP].len
                                     if hasattr(packet[IP], "chksum"):
-                                        del packet[IP].chksum
+                                        packet[IP].chksum = 0
                                     if hasattr(packet[UDP], "len"):
                                         del packet[UDP].len
                                     if hasattr(packet[UDP], "chksum"):
-                                        del packet[UDP].chksum
+                                        packet[UDP].chksum = 0
                                     decrypted_count += 1
                                     break
                                 except Exception:
                                     continue
+
+                            # Restore original timestamp
+                            packet.time = original_time
                     writer.write(packet)
         finally:
             writer.close()
