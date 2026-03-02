@@ -78,7 +78,6 @@ const logSection = document.getElementById("logSection");
 
 const downloadLogBtn = document.getElementById("downloadLogBtn");
 const clearLogBtn = document.getElementById("clearLogBtn");
-const turnOnLiveLogsToggle = document.getElementById("turnOnLiveLogsToggle");
 const appLog = document.getElementById("appLog");
 
 const projectLogLevel = String(document.body.dataset.projectLogLevel || "INFO").toUpperCase();
@@ -466,9 +465,6 @@ function parseStructuredLine(line) {
 
 function formatStructuredProjectMessage(message) {
   const msg = String(message || "").trim();
-  if (/^COMBINED FILTER:/i.test(msg)) {
-    return `<span class="log-token-filter-yellow">${escapeHtml(msg)}</span>`;
-  }
   if (/^✅\s*Correlation completed successfully\./i.test(msg)) {
     return `<span class="log-token-green">${escapeHtml(msg)}</span>`;
   }
@@ -530,8 +526,8 @@ function formatStructuredProjectMessage(message) {
     '<span class="log-token-yellow">[$1]</span>'
   );
   escaped = escaped.replace(
-    /\[(carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
-    '<span class="log-token-yellow">[$1]</span>'
+    /\[(carrier[_-]to[_-]rtpengine|rtpengine[_-]to[_-]carrier|rtpengine[_-]to[_-]core|core[_-]to[_-]rtpengine|carrier-rtpengine|rtpengine-carrier|rtpengine-core|core-rtpengine)\]/gi,
+    '<span class="log-token-muted">[$1]</span>'
   );
   escaped = escaped.replace(
     /^(\s*)(LEG:\s*CARRIER\s*-\s*RTP ENGINE|LEG:\s*RTP ENGINE\s*-\s*CORE)/i,
@@ -539,11 +535,7 @@ function formatStructuredProjectMessage(message) {
   );
 
   escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
-  escaped = escaped.replace(/(^|[^A-Z])FILTER:/g, (m, prefix) => `${prefix}<span class="log-token-filter-yellow">FILTER:</span>`);
-  escaped = escaped.replace(
-    /(<span class="log-token-filter-yellow">COMBINED FILTER:<\/span>\s*)(.*)$/gi,
-    '$1<span class="log-token-filter-yellow">$2</span>'
-  );
+  escaped = escaped.replace(/(^|[^A-Z])(FILTER:|Filter:)/g, (m, prefix, token) => `${prefix}<span class="log-token-filter-yellow">${token}</span>`);
   escaped = escaped.replace(
     /\b(packets=)(\d+)(\s+KEEP)\b/gi,
     '$1$2<span class="log-token-green">$3</span>'
@@ -556,8 +548,11 @@ function shouldKeepLineWhite(message) {
   const msg = String(message || "").trim();
   if (!msg) return false;
   if (/^=+\s*Step\s+[1-6]:.*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Phase\s+1:\s*Pre-filtering\s*\(count packets\)\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Phase\s+2:\s*Extract individual legs\s*=+\s*$/i.test(msg)) return true;
   if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
   if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*RTP Engine IP Detection\s*=+\s*$/i.test(msg)) return true;
   if (/^=+$/.test(msg)) return true;
   if (/^-+$/.test(msg)) return true;
   return false;
@@ -869,19 +864,12 @@ function startLogStreaming() {
   };
 }
 
-function updateLiveLogsToggleButton() {
-  if (!turnOnLiveLogsToggle) return;
-  turnOnLiveLogsToggle.checked = liveLogsEnabled;
-}
-
 function setLiveLogsEnabled(enabled) {
   const next = Boolean(enabled);
   if (liveLogsEnabled === next) {
-    updateLiveLogsToggleButton();
     return;
   }
   liveLogsEnabled = next;
-  updateLiveLogsToggleButton();
   if (liveLogsEnabled) {
     startLogStreaming();
     addLog("info", "Live logs enabled.");
@@ -2065,8 +2053,11 @@ async function api(path, options = {}) {
   const rid = requestId();
   const method = (options.method || "GET").toUpperCase();
   const isLogPoll = path === "/api/logs/poll" || path === "/api/logs/stream";
+  const isJobStatusPoll = /^\/api\/jobs\/[^/]+$/.test(path);
+  const isJobEventsPoll = /^\/api\/jobs\/[^/]+\/events(?:\?.*)?$/.test(path);
+  const isJobPoll = isJobStatusPoll || isJobEventsPoll;
 
-  if (DEBUG_ENABLED && !isLogPoll) {
+  if (DEBUG_ENABLED && !isLogPoll && !isJobPoll) {
     if (options.body instanceof FormData) {
       const parts = [];
       for (const [k, v] of options.body.entries()) {
@@ -2092,7 +2083,7 @@ async function api(path, options = {}) {
     data = null;
   }
 
-  if (DEBUG_ENABLED && !isLogPoll) {
+  if (DEBUG_ENABLED && !isLogPoll && !isJobPoll) {
     addLog("debug", `[res ${rid}] ${method} ${path} status=${response.status}`);
   }
 
@@ -2388,31 +2379,9 @@ function renderRawFiles(rawFileMap, rawDir, storageMode = "", storageTarget = ""
   );
   hasLoadedMediaForCorrelation = totalLinks > 0;
   const where = String(storageTarget || rawDir || "");
-  const label = String(storageMode || "").toLowerCase() === "s3" ? "S3 capture files are stored in:" : "Raw capture files are stored in:";
+  const label = "Files are stored in:";
   let html = `<p>${label} <code>${where}</code></p>`;
-  html += '<div class="raw-files-grid">';
-  Object.entries(mapObj).forEach(([host, links]) => {
-    html += '<section class="raw-host-card">';
-    html += `<h4>${host}</h4>`;
-    if (!links.length) {
-      html += "<p>No files generated.</p>";
-      html += "</section>";
-      return;
-    }
-    html += "<ul>";
-    links.forEach((link) => {
-      const value = String(link || "");
-      const downloadable = value.startsWith("/") || /^https?:\/\//i.test(value);
-      if (downloadable) {
-        html += `<li><a href="${value}" target="_blank">${value.split("/").pop()}</a></li>`;
-      } else {
-        html += `<li><code>${value}</code></li>`;
-      }
-    });
-    html += "</ul>";
-    html += "</section>";
-  });
-  html += "</div>";
+  // Individual RTP files list hidden from UI
   rawFiles.innerHTML = html;
   updateCorrelationUiState();
 }
@@ -2572,11 +2541,41 @@ function renderFinalFiles(files) {
   const dec = files.decrypted_media;
   const sip = files.sip_plus_decrypted_media;
 
-  let html = "<h3>Downloads</h3><ul>";
-  if (enc) html += `<li><a href="${enc}" target="_blank">media_raw.pcap</a></li>`;
-  if (dec) html += `<li><a href="${dec}" target="_blank">media_decrypted.pcap</a></li>`;
-  if (sip) html += `<li><a href="${sip}" target="_blank">SIP_plus_media_decrypted.pcap</a></li>`;
-  html += "</ul>";
+  let html = "<h3>Final Files</h3>";
+  html += '<div class="final-files-grid">';
+  
+  // Card 1 - Raw Media
+  if (enc) {
+    html += '<div class="final-file-card">';
+    html += '<div class="final-file-icon">📄</div>';
+    html += '<div class="final-file-title">Raw Media</div>';
+    html += '<div class="final-file-desc">Encrypted RTP/SRTP packets</div>';
+    html += `<a href="${enc}" target="_blank" class="final-file-btn">Download</a>`;
+    html += '</div>';
+  }
+  
+  // Card 2 - Decrypted Media
+  if (dec) {
+    html += '<div class="final-file-card">';
+    html += '<div class="final-file-icon">📄</div>';
+    html += '<div class="final-file-title">Decrypted Media</div>';
+    html += '<div class="final-file-desc">Media packets only (no SIP)</div>';
+    html += `<a href="${dec}" target="_blank" class="final-file-btn">Download</a>`;
+    html += '</div>';
+  }
+  
+  // Card 3 - Complete (Highlighted)
+  if (sip) {
+    html += '<div class="final-file-card final-file-card-featured">';
+    html += '<div class="final-file-badge">✓ COMPLETE</div>';
+    html += '<div class="final-file-icon">📦</div>';
+    html += '<div class="final-file-title">SIP + Decrypted</div>';
+    html += '<div class="final-file-desc">Full capture for complete analysis</div>';
+    html += `<a href="${sip}" target="_blank" class="final-file-btn final-file-btn-primary">⬇ Download</a>`;
+    html += '</div>';
+  }
+  
+  html += '</div>';
   finalResults.innerHTML = html;
   finalResults.hidden = false;
 }
@@ -3303,10 +3302,6 @@ clearLogBtn.addEventListener("click", () => {
   renderAppLog();
 });
 
-turnOnLiveLogsToggle?.addEventListener("change", () => {
-  setLiveLogsEnabled(Boolean(turnOnLiveLogsToggle.checked));
-});
-
 stayOnCaptureBtn?.addEventListener("click", () => {
   closeCaptureLeaveModal();
 });
@@ -3341,7 +3336,6 @@ window.addEventListener("pagehide", () => {
     setPostCaptureEntryMode("capture");
     resetCaptureLocationSelection();
     await initializeLogOffsetsFromCurrentFiles();
-    updateLiveLogsToggleButton();
     await syncUiWithServerCaptureState();
     updateCorrelationUiState();
   } catch (err) {

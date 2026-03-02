@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from rtphelper.services.sip_parser import SipCall, SipMessage, SipParseResult
@@ -44,11 +45,12 @@ class LegInfo:
 class RtpEngineInfo:
     """RTP Engine detection information."""
     detected: bool = False
-    engine_ip: Optional[str] = None
+    xcc_ip: Optional[str] = None  # XCC/B2BUA server IP (from SIP signaling)
+    engine_ip: Optional[str] = None  # Deprecated: use xcc_ip
     engine_ips: Set[str] = field(default_factory=set)
     sdp_change_packet: Optional[int] = None
     original_sdp_ip: Optional[str] = None  # c= IP from first INVITE
-    changed_sdp_ip: Optional[str] = None   # c= IP after change
+    changed_sdp_ip: Optional[str] = None   # c= IP after change (RTP Engine's announced IP)
 
 
 @dataclass 
@@ -157,15 +159,16 @@ def detect_rtp_engine(call: SipCall, direction: str) -> RtpEngineInfo:
     for idx, invite in enumerate(invites[1:], start=1):
         rtp_ip = _extract_audio_connection_ip(invite)
         if rtp_ip and rtp_ip != first_rtp_ip:
-            # RTP IP changed - the source of this INVITE is likely RTP Engine
+            # RTP IP changed - the source of this INVITE is the XCC (that announces RTP Engine)
             info.detected = True
-            info.engine_ip = invite.src_ip
+            info.xcc_ip = invite.src_ip
+            info.engine_ip = invite.src_ip  # Deprecated, kept for compatibility
             info.engine_ips.add(invite.src_ip)
             info.sdp_change_packet = invite.packet_number
             info.original_sdp_ip = first_rtp_ip
             info.changed_sdp_ip = rtp_ip
             LOGGER.debug(
-                "RTP Engine detected at packet=%s: c= changed from %s to %s, engine_ip=%s",
+                "RTP Engine detected at packet=%s: c= changed from %s to %s, xcc_ip=%s",
                 invite.packet_number,
                 first_rtp_ip,
                 rtp_ip,
@@ -584,7 +587,7 @@ def _add_structured_logs(ctx: CorrelationContext) -> None:
     ctx.log_lines.append(f"CallID(s): {'; '.join(ctx.call_ids)}")
     
     if ctx.rtp_engine.detected:
-        ctx.log_lines.append(f"RTP ENGINE: YES (IP: {ctx.rtp_engine.engine_ip})")
+        ctx.log_lines.append(f"RTP ENGINE: YES (XCC IP: {ctx.rtp_engine.xcc_ip})")
     else:
         ctx.log_lines.append("RTP ENGINE: NO")
     
@@ -644,9 +647,14 @@ def _format_log_banner(text: str, width: int = 67) -> str:
     ctx.log_lines.append("")
 
 
-def build_tshark_filters(ctx: CorrelationContext) -> List[Dict[str, Any]]:
+def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[str] = None, for_count: bool = False) -> List[Dict[str, Any]]:
     """
     Build tshark filter expressions from correlation context.
+    
+    Args:
+        ctx: Correlation context with carrier/core leg information
+        rtpengine_actual_ip: Actual RTP Engine IP detected from PCAP (replaces SDP-announced IP)
+        for_count: If True, omit ip.src==rtpengine_ip (used in Phase 1 count before actual IP is known)
     
     Returns a list of filter steps, each with:
     - step: step number
@@ -663,16 +671,31 @@ def build_tshark_filters(ctx: CorrelationContext) -> List[Dict[str, Any]]:
     carrier = ctx.carrier_leg
     core = ctx.core_leg
     
+    # Helper function to get the correct IP (actual detected vs announced in SDP)
+    def get_rtpengine_ip_for_filter(sdp_ip: str) -> str:
+        """
+        Returns the RTP Engine IP to use in filters.
+        If rtpengine_actual_ip is provided and sdp_ip matches the changed_sdp_ip
+        (the IP announced by RTP Engine), use the actual IP detected from PCAP.
+        """
+        if (rtpengine_actual_ip 
+            and ctx.rtp_engine.detected 
+            and ctx.rtp_engine.changed_sdp_ip 
+            and sdp_ip == ctx.rtp_engine.changed_sdp_ip):
+            return rtpengine_actual_ip
+        return sdp_ip
+    
     # Step 1: carrier -> host (RTP from carrier)
-    # Filter: ip.src == carrier_rtp_ip && udp.port == carrier_200ok_port
+    # Filter: ip.src == carrier_rtp_ip && udp.srcport == carrier_port
     if carrier.source_media and carrier.destination_media:
-        if carrier.source_media.rtp_ip and carrier.destination_media.rtp_port:
+        if carrier.source_media.rtp_ip and carrier.source_media.rtp_port:
+            # Source is carrier IP and port from INVITE
             filters.append({
                 "step": 1,
                 "leg": "carrier->host",
                 "leg_key": "leg_carrier_rtpengine",
                 "available": True,
-                "tshark_filter": f"ip.src=={carrier.source_media.rtp_ip} && udp.port=={carrier.destination_media.rtp_port}",
+                "tshark_filter": f"ip.src=={carrier.source_media.rtp_ip} && udp.srcport=={carrier.source_media.rtp_port}",
                 "reason": None,
             })
         else:
@@ -694,21 +717,36 @@ def build_tshark_filters(ctx: CorrelationContext) -> List[Dict[str, Any]]:
             "reason": "missing carrier leg media",
         })
     
-    # Step 2: host -> carrier (RTP to carrier)
-    # Filter: udp.port == carrier_request_port && ip.dst == carrier_rtp_ip
-    if carrier.source_media and carrier.source_media.rtp_ip and carrier.source_media.rtp_port:
-        if ctx.direction == "outbound":
-            filter_expr = f"udp.srcport=={carrier.source_media.rtp_port} && ip.dst=={carrier.source_media.rtp_ip}"
+    # Step 2: host -> carrier (RTP Engine to carrier)
+    # Phase 1 count (for_count=True): udp.srcport && ip.dst (omit ip.src - not yet detected)
+    # Phase 2 extract (for_count=False): ip.src && udp.srcport (omit ip.dst - redundant)
+    if carrier.source_media and carrier.destination_media:
+        if carrier.destination_media.rtp_ip and carrier.destination_media.rtp_port and carrier.source_media.rtp_ip:
+            if for_count:
+                # Phase 1 count: don't filter by RTP Engine IP (not yet detected)
+                filter_expr = f"udp.srcport=={carrier.destination_media.rtp_port} && ip.dst=={carrier.source_media.rtp_ip}"
+            else:
+                # Phase 2 extract: use actual RTP Engine IP, omit destination IP
+                rtpengine_ip = get_rtpengine_ip_for_filter(carrier.destination_media.rtp_ip)
+                filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={carrier.destination_media.rtp_port}"
+            
+            filters.append({
+                "step": 2,
+                "leg": "host->carrier",
+                "leg_key": "leg_rtpengine_carrier",
+                "available": True,
+                "tshark_filter": filter_expr,
+                "reason": None,
+            })
         else:
-            filter_expr = f"udp.port=={carrier.source_media.rtp_port} && ip.dst=={carrier.source_media.rtp_ip}"
-        filters.append({
-            "step": 2,
-            "leg": "host->carrier",
-            "leg_key": "leg_rtpengine_carrier",
-            "available": True,
-            "tshark_filter": filter_expr,
-            "reason": None,
-        })
+            filters.append({
+                "step": 2,
+                "leg": "host->carrier",
+                "leg_key": "leg_rtpengine_carrier",
+                "available": False,
+                "tshark_filter": None,
+                "reason": "missing carrier media info",
+            })
     else:
         filters.append({
             "step": 2,
@@ -719,21 +757,20 @@ def build_tshark_filters(ctx: CorrelationContext) -> List[Dict[str, Any]]:
             "reason": "missing carrier source media",
         })
     
-    # Step 3: host -> core (RTP to core)
-    # Filter depends on direction
+    # Step 3: host -> core (RTP Engine to core)
+    # Phase 1 count (for_count=True): udp.srcport && ip.dst (omit ip.src - not yet detected)
+    # Phase 2 extract (for_count=False): ip.src && udp.srcport (omit ip.dst - redundant)
     if core.source_media and core.destination_media:
-        if ctx.direction == "outbound":
-            # For outbound: udp.srcport == core_reply_port && ip.dst == core_request_ip
-            if core.destination_media.rtp_port and core.source_media.rtp_ip:
-                filter_expr = f"udp.srcport=={core.destination_media.rtp_port} && ip.dst=={core.source_media.rtp_ip}"
+        if core.source_media.rtp_ip and core.source_media.rtp_port and core.destination_media.rtp_ip:
+            if for_count:
+                # Phase 1 count: don't filter by RTP Engine IP (not yet detected)
+                filter_expr = f"udp.srcport=={core.source_media.rtp_port} && ip.dst=={core.destination_media.rtp_ip}"
             else:
-                filter_expr = None
+                # Phase 2 extract: use actual RTP Engine IP, omit destination IP
+                rtpengine_ip = get_rtpengine_ip_for_filter(core.source_media.rtp_ip)
+                filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={core.source_media.rtp_port}"
         else:
-            # For inbound: udp.port == core_request_port && ip.dst == core_reply_ip
-            if core.source_media.rtp_port and core.destination_media.rtp_ip:
-                filter_expr = f"udp.port=={core.source_media.rtp_port} && ip.dst=={core.destination_media.rtp_ip}"
-            else:
-                filter_expr = None
+            filter_expr = None
         
         if filter_expr:
             filters.append({
@@ -764,20 +801,13 @@ def build_tshark_filters(ctx: CorrelationContext) -> List[Dict[str, Any]]:
         })
     
     # Step 4: core -> host (RTP from core)
-    # Filter: ip.src == core_rtp_ip && udp.port == core_port
+    # Filter: ip.src == core_ip && udp.srcport == core_port
     if core.source_media and core.destination_media:
-        if ctx.direction == "outbound":
-            # For outbound: ip.src == core_request_ip && udp.port == core_request_port
-            if core.source_media.rtp_ip and core.source_media.rtp_port:
-                filter_expr = f"ip.src=={core.source_media.rtp_ip} && udp.port=={core.source_media.rtp_port}"
-            else:
-                filter_expr = None
+        if core.destination_media.rtp_ip and core.destination_media.rtp_port:
+            # Core's IP and port from 200 OK
+            filter_expr = f"ip.src=={core.destination_media.rtp_ip} && udp.srcport=={core.destination_media.rtp_port}"
         else:
-            # For inbound: ip.src == core_reply_ip && udp.port == core_reply_port
-            if core.destination_media.rtp_ip and core.destination_media.rtp_port:
-                filter_expr = f"ip.src=={core.destination_media.rtp_ip} && udp.port=={core.destination_media.rtp_port}"
-            else:
-                filter_expr = None
+            filter_expr = None
         
         if filter_expr:
             filters.append({
@@ -808,6 +838,86 @@ def build_tshark_filters(ctx: CorrelationContext) -> List[Dict[str, Any]]:
         })
     
     return filters
+
+
+def detect_rtpengine_ip_from_pcap(
+    pcap_file: Path,
+    *,
+    carrier_ips: Set[str],
+    core_ips: Set[str],
+    max_packets: int = 5,
+) -> Optional[str]:
+    """
+    Detect the actual RTP Engine IP from a capture PCAP file.
+    
+    Analyzes the first few packets to find the common IP that appears as src or dst,
+    excluding known carrier and core IPs. This IP is the RTP Engine's actual IP
+    in the capture (which may differ from the public IP announced in SDP).
+    
+    Args:
+        pcap_file: Path to the captured PCAP file
+        carrier_ips: Set of known carrier IP addresses to exclude
+        core_ips: Set of known core IP addresses to exclude
+        max_packets: Maximum number of packets to analyze
+        
+    Returns:
+        The detected RTP Engine IP, or None if detection fails
+    """
+    if not pcap_file.exists():
+        return None
+    
+    try:
+        from collections import Counter
+        from scapy.layers.inet import IP, UDP
+        from scapy.packet import Raw
+        from scapy.utils import PcapReader
+        
+        ip_counter = Counter()
+        known_ips = carrier_ips | core_ips
+        
+        with PcapReader(str(pcap_file)) as reader:
+            for idx, pkt in enumerate(reader):
+                if idx >= max_packets:
+                    break
+                    
+                if IP not in pkt or UDP not in pkt:
+                    continue
+                
+                # Check if it's an RTP packet (basic validation)
+                if Raw in pkt[UDP]:
+                    payload = bytes(pkt[UDP][Raw].load)
+                    if len(payload) >= 12 and (payload[0] >> 6) == 2:
+                        # Valid RTP packet, count IPs
+                        src_ip = pkt[IP].src
+                        dst_ip = pkt[IP].dst
+                        
+                        # Only count IPs that are not carrier/core
+                        if src_ip not in known_ips:
+                            ip_counter[src_ip] += 1
+                        if dst_ip not in known_ips:
+                            ip_counter[dst_ip] += 1
+        
+        # Return the most common IP (should be RTP Engine)
+        if ip_counter:
+            most_common_ip, count = ip_counter.most_common(1)[0]
+            LOGGER.debug(
+                "Detected RTP Engine IP from PCAP file=%s ip=%s occurrences=%s",
+                pcap_file.name,
+                most_common_ip,
+                count,
+                extra={"category": "SIP_CORRELATION"},
+            )
+            return most_common_ip
+            
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to detect RTP Engine IP from PCAP file=%s error=%s",
+            pcap_file.name,
+            exc,
+            extra={"category": "SIP_CORRELATION"},
+        )
+    
+    return None
 
 
 def correlate_sip_call(
