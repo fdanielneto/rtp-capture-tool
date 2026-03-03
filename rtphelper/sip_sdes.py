@@ -91,13 +91,6 @@ def extract_sdes_keys_from_pcap(sip_pcap: Path, call_id_filter: str | None = Non
                             master_salt=master_salt,
                         )
                     )
-                if debug_sdp_summary:
-                    LOGGER.debug(
-                        "SIP frame SDP summary call_id=%s fields=%s",
-                        call_id,
-                        " | ".join(debug_sdp_summary[:10]),
-                        extra={"category": "SDP", "correlation_id": call_id},
-                    )
         finally:
             cap.close()
     elapsed_ms = int((time.perf_counter() - start_ts) * 1000)

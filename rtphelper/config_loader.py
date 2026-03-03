@@ -115,7 +115,6 @@ class AppConfig(BaseModel):
 
 
 def load_config(config_path: Path) -> AppConfig:
-    LOGGER.info("Loading config path=%s", config_path, extra={"category": "CONFIG"})
     if not config_path.exists():
         raise ValueError(f"Config file not found: {config_path}")
 
@@ -129,7 +128,7 @@ def load_config(config_path: Path) -> AppConfig:
 
     try:
         cfg = AppConfig.model_validate(parsed)
-        LOGGER.info("Config loaded environments=%s", sorted(cfg.environments.keys()), extra={"category": "CONFIG"})
+        LOGGER.info("Config loaded path=%s environments=%s", config_path, sorted(cfg.environments.keys()), extra={"category": "CONFIG"})
         return cfg
     except ValidationError as exc:
         LOGGER.error("Config validation failed error=%s", exc, extra={"category": "ERRORS"})

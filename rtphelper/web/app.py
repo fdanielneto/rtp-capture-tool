@@ -250,7 +250,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
-    LOGGER.debug("Rendering index page", extra={"category": "PERF"})
     configured_environments = CAPTURE_SERVICE.list_environments()
     if not configured_environments:
         raise HTTPException(
@@ -657,12 +656,6 @@ def resume_storage_flush(payload: Dict[str, Any]) -> Dict[str, Any]:
         flush = CAPTURE_SERVICE.storage_flush_resume(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    LOGGER.info(
-        "S3 flush resumed by user session_id=%s pending_files=%s",
-        session_id,
-        int(flush.get("pending_files") or 0),
-        extra={"category": "FILES", "correlation_id": session_id},
-    )
     return {"session_id": session_id, "storage_flush": flush}
 
 
@@ -671,7 +664,6 @@ async def import_capture(
     output_dir_name: str = Form(""),
     media_files: List[UploadFile] = File(...),
 ) -> Dict[str, Any]:
-    LOGGER.info("API import capture requested output_dir_name=%s files_received=%s", output_dir_name or "-", len(media_files), extra={"category": "FILES"})
     if not media_files:
         raise HTTPException(status_code=400, detail="No media files received")
 
@@ -862,14 +854,6 @@ def capture_status() -> Dict[str, Any]:
         }
 
     counts = CAPTURE_SERVICE.session_packet_counts(session)
-    LOGGER.debug(
-        "API capture status session_id=%s running=%s failed=%s counts=%s",
-        session.session_id,
-        session.running,
-        session.failed,
-        counts,
-        extra={"category": "CAPTURE", "correlation_id": session.session_id},
-    )
     return {
         "running": session.running,
         "session_id": session.session_id,
@@ -899,7 +883,6 @@ def health() -> Dict[str, Any]:
     status_value = "ok"
     if session and session.failed:
         status_value = "degraded"
-    LOGGER.debug("Health check status=%s", status_value, extra={"category": "PERF"})
     return {
         "status": status_value,
         "active_session": session.session_id if session else None,
@@ -2425,7 +2408,6 @@ def latest_files() -> Dict[str, Any]:
     session = CAPTURE_SERVICE.latest_session()
     if session is None:
         raise HTTPException(status_code=404, detail="No capture session available")
-    LOGGER.info("API latest files session_id=%s", session.session_id, extra={"category": "FILES", "correlation_id": session.session_id})
 
     raw = _raw_file_links(session)
     decrypted = [_file_link(session, "decrypted", path) for path in session.decrypted_dir.glob("*.pcap")]
