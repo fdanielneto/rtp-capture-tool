@@ -564,6 +564,14 @@ button:disabled {
   margin: 0;
 }
 
+#chooseS3SpoolDirBtn {
+  margin-left: auto;
+}
+
+#chooseS3SpoolDirBtn[hidden] {
+  display: none;
+}
+
 .checkbox-inline input {
   width: auto;
   margin: 0;
@@ -884,13 +892,15 @@ button:disabled {
 
 #captureLocationDisclaimer.capture-location-warning {
   margin-top: 12px;
-  border: none;
-  background: transparent;
-  color: #f97316;
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1.45;
-  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(51, 65, 85, 0.5);
+  color: #e2e8f0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 14px 16px;
+  border-radius: 6px;
+  border-left: 3px solid #60a5fa;
 }
 
 @keyframes subregionProgress {

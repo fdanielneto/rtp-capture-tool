@@ -1763,15 +1763,15 @@ function updateCaptureLocationDisclaimer() {
   if (!captureLocationDisclaimer) return;
   const mode = captureLocationS3?.checked ? "s3" : "local";
   selectedCaptureStorage = mode;
-  if (s3SpoolDirPanel) {
-    s3SpoolDirPanel.hidden = mode !== "s3";
+  if (chooseS3SpoolDirBtn) {
+    chooseS3SpoolDirBtn.hidden = mode !== "s3";
   }
   if (mode === "local") {
-    captureLocationDisclaimer.textContent = `Files will be saved locally under ${captureRootConfigured || "(configured capture root)"}.`;
+    captureLocationDisclaimer.textContent = `Files will be saved in: ${captureRootConfigured || "(configured capture root)"}`;
     return;
   }
   captureLocationDisclaimer.textContent =
-    "AWS S3 upload requires high network throughput. If upload is slower than capture, local disk usage may grow and can fill the disk. If disk space is not enough and internet throughput is low, consider using an external disk.";
+    "AWS S3 uploads require high network throughput. If upload is slower than capture, disk space may fill up — consider attaching an external disk temporarily.";
 }
 
 function resetCaptureLocationSelection() {
@@ -1822,6 +1822,7 @@ function showCaptureLocationPanel() {
   hostPanel.hidden = true;
   livePanel.hidden = true;
   postSection.hidden = true;
+  updateCaptureLocationDisclaimer();
 }
 
 function showCaptureScopePanels() {
