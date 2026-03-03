@@ -1735,10 +1735,25 @@ async def correlate(
             log_lines.append(f"INFO:   Original RTP IP: {correlation_ctx.rtp_engine.original_sdp_ip}")
         log_lines.append("INFO: Mapping capture files to RTP Engine hosts...")
         
-        # Get media PCAPs for detection
-        temp_media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, [])
+        # Map instances to host IPs using S3 keys (filenames) without downloading
+        # For local files, use existing file paths
+        local_files = [p for files in session.host_files.values() for p in files if p.exists()]
         
-        if temp_media_pcaps:
+        if local_files:
+            # Use local file names for mapping
+            log_lines.append(f"INFO: Using {len(local_files)} local file(s) for instance mapping")
+            file_names = [p.name for p in local_files]
+        elif session.s3_source_objects:
+            # Use S3 keys (filenames) for mapping without downloading
+            log_lines.append(f"INFO: Using S3 file names for instance mapping (no download required)")
+            file_names = []
+            for host_id, keys in session.s3_source_objects.items():
+                for key in keys:
+                    file_names.append(Path(str(key)).name)
+        else:
+            file_names = []
+        
+        if file_names:
             # Extract known IPs (carrier and core) to exclude from detection
             carrier_ips = set()
             core_ips = set()
@@ -1759,25 +1774,29 @@ async def correlate(
                 if correlation_ctx.core_leg.destination_media and correlation_ctx.core_leg.destination_media.rtp_ip:
                     core_ips.add(correlation_ctx.core_leg.destination_media.rtp_ip)
             
-            # Group PCAPs by RTP Engine instance
-            pcap_groups = _group_pcaps_by_rtp_instance(temp_media_pcaps)
+            # Group file names by RTP Engine instance
+            from collections import defaultdict
+            pcap_groups: Dict[Optional[str], List[str]] = defaultdict(list)
+            for file_name in file_names:
+                instance_id = _extract_rtp_engine_instance(file_name)
+                pcap_groups[instance_id].append(file_name)
+            
             log_lines.append(f"INFO: Found {len(pcap_groups)} RTP Engine instance group(s)")
             
             # Map each RTP Engine instance to its host IP via config lookup
-            for instance_id, instance_pcaps in sorted(pcap_groups.items()):
+            for instance_id, instance_files in sorted(pcap_groups.items()):
                 if instance_id is None:
-                    skipped_names = [p.name for p in instance_pcaps]
-                    log_lines.append(f"INFO: Skipping {len(instance_pcaps)} file(s) without RTP Engine instance identifier:")
-                    for name in skipped_names:
+                    log_lines.append(f"INFO: Skipping {len(instance_files)} file(s) without RTP Engine instance identifier:")
+                    for name in instance_files:
                         log_lines.append(f"INFO:   - {name}")
                     continue
                 
-                log_lines.append(f"INFO: Mapping instance '{instance_id}' ({len(instance_pcaps)} file(s))")
+                log_lines.append(f"INFO: Mapping instance '{instance_id}' ({len(instance_files)} file(s))")
                 
                 # Try to extract host_id from filename and lookup in config
                 detected_ip = None
-                for pcap_file in instance_pcaps[:3]:  # Check first 3 files of this instance
-                    host_id = _extract_host_id_from_filename(pcap_file.name)
+                for file_name in instance_files[:3]:  # Check first 3 files of this instance
+                    host_id = _extract_host_id_from_filename(file_name)
                     if host_id:
                         # Search for host in config across all environments/regions
                         for env_name, env_cfg in CAPTURE_SERVICE._config.environments.items():
@@ -1830,9 +1849,33 @@ async def correlate(
         else:
             log_lines.append("WARN: No media PCAPs available for mapping")
 
+    # Build combined filter BEFORE materializing S3 files (for inline filtering)
+    if not correlation_ctx:
+        log_lines.append("ERROR: No correlation context available for filter building")
+        return {"call_id": call.call_id, "message": "No correlation context", "log_tail": log_lines}
+    
+    base_steps = build_tshark_filters(correlation_ctx, None, for_count=True)
+    
+    # Build combined filter (all legs with OR) for pre-filtering S3 downloads
+    available_base_filters = []
+    for step_info in base_steps:
+        if step_info.get("available") and step_info.get("tshark_filter"):
+            available_base_filters.append(step_info["tshark_filter"])
+    
+    if not available_base_filters:
+        log_lines.append("ERROR: No available filters could be built")
+        return {"call_id": call.call_id, "message": "No available filters", "log_tail": log_lines}
+    
+    combined_filter = " || ".join(f"({f})" for f in available_base_filters)
+
     # Apply RTP filters per PCAP file using instance-specific IPs
     log_lines.append(_format_log_banner("Step 3: Apply RTP filters"))
-    media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, log_lines)
+    media_pcaps = _materialize_media_pcaps_for_correlation(
+        session, call_cid, log_lines, 
+        correlation_ctx=correlation_ctx,
+        rtpengine_ip_per_instance=rtpengine_ip_per_instance,
+        combined_filter=combined_filter
+    )
     log_lines.append(f"INFO: Media capture files available: {len(media_pcaps)}")
     
     if rtpengine_ip_per_instance:
@@ -1874,45 +1917,74 @@ async def correlate(
     add_log_line("INFO: Each leg filter will be applied against all capture files")
     add_log_line("INFO: This may take a few moments - results will appear as processing completes")
     
-    # Get base filter steps (without instance-specific IPs yet)
-    if not correlation_ctx:
-        log_lines.append("ERROR: No correlation context available for filter building")
-        return {"call_id": call.call_id, "message": "No correlation context", "log_tail": log_lines}
-    
-    base_steps = build_tshark_filters(correlation_ctx, None, for_count=True)
-    
     # Determine number of parallel workers
     max_workers = 10
     
-    # Build combined filter (all legs with OR) for pre-filtering
-    available_base_filters = []
-    for step_info in base_steps:
-        if step_info.get("available") and step_info.get("tshark_filter"):
-            available_base_filters.append(step_info["tshark_filter"])
-    
-    if not available_base_filters:
-        log_lines.append("ERROR: No available filters could be built")
-        return {"call_id": call.call_id, "message": "No available filters", "log_tail": log_lines}
-    
-    combined_filter = " || ".join(f"({f})" for f in available_base_filters)
+    # Check if files are from S3 cache (already filtered) or local raw (need Phase 1)
+    is_s3_cache = any("s3_source_cache" in str(p.parent) for p in media_pcaps) if media_pcaps else False
     
     # Phase 1: Pre-filtering - count packets with combined filter to identify files with traffic
-    add_log_line(_format_log_banner("Phase 1: Pre-filtering (count packets)"))
-    add_log_line(f"INFO: Scanning {len(media_pcaps)} capture files with combined filter...")
-    add_log_line(f"INFO: Combined Filter: {combined_filter}")
-    add_log_line(f"INFO: This identifies which files contain relevant RTP packets (count > 1)")
-    
-    files_with_traffic: Dict[Path, int] = {}  # file -> packet_count
-    
-    # Count packets in parallel
-    if max_workers > 1:
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(media_pcaps))) as count_executor:
-            count_futures = {}
+    # Skip Phase 1 if files already filtered during S3 download
+    if is_s3_cache:
+        add_log_line(_format_log_banner("Phase 1: Pre-filtering (count packets)"))
+        add_log_line(f"INFO: Phase 1 SKIPPED - files already filtered during S3 download")
+        add_log_line(f"INFO: All {len(media_pcaps)} files passed inline filtering")
+        files_with_traffic = {p: 1 for p in media_pcaps}  # Assume all have traffic (already filtered)
+    else:
+        add_log_line(_format_log_banner("Phase 1: Pre-filtering (count packets)"))
+        add_log_line(f"INFO: Scanning {len(media_pcaps)} capture files with combined filter...")
+        add_log_line(f"INFO: COMBINED FILTER: {combined_filter}")
+        add_log_line(f"INFO: This identifies which files contain relevant RTP packets (count > 1)")
+        
+        files_with_traffic: Dict[Path, int] = {}  # file -> packet_count
+        
+        # Count packets in parallel
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(media_pcaps))) as count_executor:
+                count_futures = {}
+                for pcap_file in media_pcaps:
+                    instance_id = _extract_rtp_engine_instance(pcap_file.name)
+                    rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
+                    
+                    # Build instance-specific combined filter if needed
+                    file_combined_filter = combined_filter
+                    if rtpengine_actual_ip:
+                        instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=True)
+                        instance_filters = [s["tshark_filter"] for s in instance_steps if s.get("available") and s.get("tshark_filter")]
+                        if instance_filters:
+                            file_combined_filter = " || ".join(f"({f})" for f in instance_filters)
+                    
+                    future = count_executor.submit(_tshark_count_matches, pcap_file, file_combined_filter, call_cid)
+                    count_futures[future] = pcap_file
+                
+                # Collect count results
+                for future in as_completed(count_futures):
+                    pcap_file = count_futures[future]
+                    try:
+                        count = future.result()
+                        if count > 1:
+                            files_with_traffic[pcap_file] = count
+                            add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
+                        else:
+                            # File has no relevant traffic - delete if from S3 cache (should not happen here but handle it)
+                            is_s3_local_cache = "s3_source_cache" in str(pcap_file.parent)
+                            if is_s3_local_cache:
+                                try:
+                                    pcap_file.unlink()
+                                    add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP (deleted from cache)")
+                                except Exception as del_exc:
+                                    add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP (failed to delete: {del_exc})")
+                            else:
+                                add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP")
+                    except Exception as exc:
+                        add_log_line(f"  ERROR: {pcap_file.name}: count failed - {exc}")
+                    
+        else:
+            # Sequential count if only 1 worker
             for pcap_file in media_pcaps:
                 instance_id = _extract_rtp_engine_instance(pcap_file.name)
                 rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
                 
-                # Build instance-specific combined filter if needed
                 file_combined_filter = combined_filter
                 if rtpengine_actual_ip:
                     instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=True)
@@ -1920,44 +1992,24 @@ async def correlate(
                     if instance_filters:
                         file_combined_filter = " || ".join(f"({f})" for f in instance_filters)
                 
-                future = count_executor.submit(_tshark_count_matches, pcap_file, file_combined_filter, call_cid)
-                count_futures[future] = pcap_file
-            
-            # Collect count results
-            for future in as_completed(count_futures):
-                pcap_file = count_futures[future]
                 try:
-                    count = future.result()
+                    count = _tshark_count_matches(pcap_file, file_combined_filter, call_cid)
                     if count > 1:
                         files_with_traffic[pcap_file] = count
                         add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
                     else:
-                        add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP")
+                        # File has no relevant traffic - delete if from S3 cache (should not happen here but handle it)
+                        is_s3_local_cache = "s3_source_cache" in str(pcap_file.parent)
+                        if is_s3_local_cache:
+                            try:
+                                pcap_file.unlink()
+                                add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP (deleted from cache)")
+                            except Exception as del_exc:
+                                add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP (failed to delete: {del_exc})")
+                        else:
+                            add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP")
                 except Exception as exc:
                     add_log_line(f"  ERROR: {pcap_file.name}: count failed - {exc}")
-                
-    else:
-        # Sequential count if only 1 worker
-        for pcap_file in media_pcaps:
-            instance_id = _extract_rtp_engine_instance(pcap_file.name)
-            rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
-            
-            file_combined_filter = combined_filter
-            if rtpengine_actual_ip:
-                instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=True)
-                instance_filters = [s["tshark_filter"] for s in instance_steps if s.get("available") and s.get("tshark_filter")]
-                if instance_filters:
-                    file_combined_filter = " || ".join(f"({f})" for f in instance_filters)
-            
-            try:
-                count = _tshark_count_matches(pcap_file, file_combined_filter, call_cid)
-                if count > 1:
-                    files_with_traffic[pcap_file] = count
-                    add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
-                else:
-                    add_log_line(f"  ✗ {pcap_file.name}: {count} packets - SKIP")
-            except Exception as exc:
-                add_log_line(f"  ERROR: {pcap_file.name}: count failed - {exc}")
     
     if not files_with_traffic:
         add_log_line("ERROR: No files contain RTP packets matching the filters (all counts <= 1)")
@@ -2048,6 +2100,9 @@ async def correlate(
         add_log_line(f"INFO: Each task runs tshark to extract packets from PCAP files (may take 5-30 seconds per file)")
         add_log_line(f"INFO: Results will appear as tasks complete...")
 
+        # Track merge futures separately to avoid blocking the extraction pipeline
+        merge_futures = {}
+        
         for future in as_completed(all_futures):
             leg_label, pcap_file, instance_id = all_futures[future]
             completed_tasks += 1
@@ -2080,40 +2135,84 @@ async def correlate(
             except Exception as exc:
                 add_log_line(f"  [{completed_tasks}/{total_tasks}] ERROR: {leg_label} from {pcap_file.name}: {exc}")
             
-            # Check if this leg is complete
-            if leg_completed_tasks[leg_label] == leg_pending_tasks[leg_label]:
+            # Check if this leg is complete and submit merge as background task
+            if leg_completed_tasks[leg_label] == leg_pending_tasks[leg_label] and leg_label not in merge_futures:
                 if leg_extracted_files[leg_label]:
                     add_log_line(
                         f"INFO: Leg {leg_label} COMPLETE: extracted from {len(leg_extracted_files[leg_label])} "
                         f"files (total packets={leg_total_packets[leg_label]})"
                     )
                     
-                    # Merge immediately for this leg
-                    add_log_line(f"INFO: Merging {leg_label}...")
-                    final_leg_file = filtered_dir / f"{leg_label}-merged.pcap"
-                    if len(leg_extracted_files[leg_label]) == 1:
-                        # Only one file, just copy
-                        shutil.copy2(leg_extracted_files[leg_label][0], final_leg_file)
-                    else:
-                        # Merge multiple files
-                        merge_pcaps(final_leg_file, leg_extracted_files[leg_label])
+                    # Submit merge as background task (non-blocking)
+                    add_log_line(f"INFO: Queuing merge for {leg_label}...")
                     
-                    with log_lock:
-                        filtered_files.append(final_leg_file)
-                        # Store metadata for decryption
-                        leg_file_metadata[final_leg_file] = {
-                            "leg_label": leg_label,
-                            "leg_key": f"leg_{leg_label}",
-                            "step": list(leg_labels.keys())[list(leg_labels.values()).index(leg_label)],
-                            "packets": leg_total_packets[leg_label],
+                    def merge_leg(leg_label_inner, leg_files, leg_packets):
+                        """Merge leg files in background thread"""
+                        final_leg_file = filtered_dir / f"{leg_label_inner}-merged.pcap"
+                        if len(leg_files) == 1:
+                            shutil.copy2(leg_files[0], final_leg_file)
+                        else:
+                            merge_pcaps(final_leg_file, leg_files)
+                        return {
+                            "leg_label": leg_label_inner,
+                            "final_file": final_leg_file,
+                            "packets": leg_packets,
                         }
                     
-                    add_log_line(f"INFO: Created final file: {final_leg_file.name}")
+                    merge_future = executor.submit(
+                        merge_leg, 
+                        leg_label, 
+                        list(leg_extracted_files[leg_label]),  # Copy list to avoid race conditions
+                        leg_total_packets[leg_label]
+                    )
+                    merge_futures[leg_label] = merge_future
                 else:
                     add_log_line(f"INFO: Leg {leg_label} COMPLETE: no packets found across all files")
     
+    # All extraction tasks complete - now wait for any pending merges
+    add_log_line(f"INFO: Extraction pipeline complete - waiting for {len(merge_futures)} merge(s) to finish")
+    
+    # Process merge results as they complete (parallel merges)
+    for merge_future in as_completed(merge_futures.values()):
+        try:
+            merge_result = merge_future.result()
+            final_leg_file = merge_result["final_file"]
+            leg_label = merge_result["leg_label"]
+            
+            with log_lock:
+                filtered_files.append(final_leg_file)
+                # Store metadata for decryption
+                leg_file_metadata[final_leg_file] = {
+                    "leg_label": merge_result["leg_label"],
+                    "leg_key": f"leg_{merge_result['leg_label']}",
+                    "step": list(leg_labels.keys())[list(leg_labels.values()).index(merge_result["leg_label"])],
+                    "packets": merge_result["packets"],
+                }
+            
+            add_log_line(f"INFO: Merge complete for {leg_label}: {final_leg_file.name}")
+        except Exception as exc:
+            add_log_line(f"ERROR: Merge failed: {exc}")
+    
     # All legs complete - pipeline finished
     add_log_line(f"INFO: Streaming pipeline complete - {len(filtered_files)} final leg files created")
+    
+    # Clean up s3_source_cache files (no longer needed after filtered files created)
+    files_deleted = 0
+    files_failed = 0
+    for pcap_file in files_with_traffic.keys():
+        is_s3_cache = "s3_source_cache" in str(pcap_file.parent)
+        if is_s3_cache and pcap_file.exists():
+            try:
+                pcap_file.unlink()
+                files_deleted += 1
+            except Exception as del_exc:
+                files_failed += 1
+                add_log_line(f"WARN: Failed to delete source cache file {pcap_file.name}: {del_exc}")
+    
+    if files_deleted > 0:
+        add_log_line(f"INFO: Cleaned up {files_deleted} source cache file(s) from s3_source_cache")
+    if files_failed > 0:
+        add_log_line(f"WARN: Failed to delete {files_failed} source cache file(s)")
     
     # Log per-instance statistics
     if instance_filter_stats:
@@ -3363,7 +3462,14 @@ def _group_pcaps_by_rtp_instance(pcap_files: List[Path]) -> Dict[Optional[str], 
     return dict(groups)
 
 
-def _materialize_media_pcaps_for_correlation(session: CaptureSession, correlation_id: str, log_lines: List[str]) -> List[Path]:
+def _materialize_media_pcaps_for_correlation(
+    session: CaptureSession, 
+    correlation_id: str, 
+    log_lines: List[str],
+    correlation_ctx=None,
+    rtpengine_ip_per_instance: Optional[Dict[str, str]] = None,
+    combined_filter: Optional[str] = None
+) -> List[Path]:
     local_files = [p for files in session.host_files.values() for p in files if p.exists()]
     if local_files:
         log_lines.append(f"INFO: Using {len(local_files)} local media file(s) already available.")
@@ -3372,57 +3478,132 @@ def _materialize_media_pcaps_for_correlation(session: CaptureSession, correlatio
         return []
     total_files = sum(len(v) for v in session.s3_source_objects.values())
     log_lines.append(f"== Step 3.1: Materialize media from S3 ({total_files} file(s)) ==")
+    if combined_filter:
+        log_lines.append(f"INFO: Will apply inline filtering with parallel downloads")
+        log_lines.append(f"INFO: COMBINED FILTER: {combined_filter}")
     cache_dir = session.base_dir / "s3_source_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Thread-safe logging and result collection
+    import threading
+    log_lock = threading.Lock()
+    materialized_lock = threading.Lock()
     materialized: List[Path] = []
+    
+    def add_log(line: str) -> None:
+        with log_lock:
+            log_lines.append(line)
+    
+    def add_materialized(path: Path) -> None:
+        with materialized_lock:
+            materialized.append(path)
+    
+    # Build list of tasks: (host_id, key, file_index, base_name, target_path)
+    tasks = []
     file_index = 0
-    phase_started = time.monotonic()
     for host_id, keys in sorted(session.s3_source_objects.items()):
         for key in keys:
             file_index += 1
             base_name = Path(str(key)).name
             target = cache_dir / base_name
-            if target.exists():
-                stem = target.stem
-                suffix = target.suffix
-                i = 1
-                while True:
-                    cand = cache_dir / f"{stem}__{i}{suffix}"
-                    if not cand.exists():
-                        target = cand
-                        break
-                    i += 1
-            try:
-                log_lines.append(
-                    f"INFO: S3 media file start {file_index}/{total_files} host={host_id} file={base_name}"
+            tasks.append((host_id, key, file_index, base_name, target))
+    
+    def process_single_file(task) -> None:
+        """Download (or reuse) and filter a single S3 file"""
+        host_id, key, idx, base_name, target = task
+        
+        try:
+            # Check if file already exists in cache
+            file_exists = target.exists()
+            
+            if file_exists:
+                add_log(f"INFO: S3 media file {idx}/{total_files} host={host_id} file={base_name} - using cached file")
+            else:
+                add_log(f"INFO: S3 media file start {idx}/{total_files} host={host_id} file={base_name}")
+                # Download from S3
+                CAPTURE_SERVICE._s3.download_key_to_file(str(key), target)  # type: ignore[attr-defined]
+                add_log(f"INFO: S3 media file {idx}/{total_files} host={host_id} file={base_name} - download complete")
+            
+            # Apply inline filtering if combined_filter provided
+            if combined_filter:
+                instance_id = _extract_rtp_engine_instance(target.name)
+                rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id and rtpengine_ip_per_instance else None
+                
+                # Build instance-specific combined filter if needed
+                file_combined_filter = combined_filter
+                if rtpengine_actual_ip and correlation_ctx:
+                    from rtphelper.services.sip_correlation import build_tshark_filters
+                    instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=True)
+                    instance_filters = [s["tshark_filter"] for s in instance_steps if s.get("available") and s.get("tshark_filter")]
+                    if instance_filters:
+                        file_combined_filter = " || ".join(f"({f})" for f in instance_filters)
+                
+                try:
+                    count = _tshark_count_matches(target, file_combined_filter, correlation_id)
+                    if count > 1:
+                        add_materialized(target)
+                        add_log(
+                            f"INFO: S3 media file {idx}/{total_files} host={host_id} file={base_name} - {count} packets - KEEP"
+                        )
+                    else:
+                        # Delete file with no relevant traffic
+                        try:
+                            target.unlink()
+                            add_log(
+                                f"INFO: S3 media file {idx}/{total_files} host={host_id} file={base_name} - {count} packets - SKIP (deleted)"
+                            )
+                        except Exception as del_exc:
+                            add_log(
+                                f"WARN: S3 media file {idx}/{total_files} host={host_id} file={base_name} - {count} packets - SKIP (failed to delete: {del_exc})"
+                            )
+                except Exception as filter_exc:
+                    # Filter failed - keep file and log error
+                    add_materialized(target)
+                    add_log(
+                        f"WARN: S3 media file {idx}/{total_files} host={host_id} file={base_name} - filter failed: {filter_exc} - KEEP"
+                    )
+            else:
+                # No filtering - keep all files
+                add_materialized(target)
+                add_log(
+                    f"INFO: S3 media file ready {idx}/{total_files} host={host_id} file={base_name}"
                 )
-                _run_with_heartbeat(
-                    run=lambda: CAPTURE_SERVICE._s3.download_key_to_file(str(key), target),  # type: ignore[attr-defined]
-                    heartbeat_message=lambda elapsed_s: (
-                        "INFO: S3 download in progress "
-                        f"file={file_index}/{total_files} host={host_id} file={base_name} elapsed={elapsed_s:.0f}s"
-                    ),
-                )
-                materialized.append(target)
-                log_lines.append(
-                    f"INFO: S3 media file ready {file_index}/{total_files} host={host_id} file={base_name}"
-                )
-                LOGGER.info(
-                    "Correlation source materialized from S3 host=%s key=%s local=%s",
-                    host_id,
-                    key,
-                    target,
-                    extra={"category": "FILES", "correlation_id": correlation_id},
-                )
-            except Exception as exc:
-                log_lines.append(f"WARN: Could not read S3 media file host={host_id} key={key} reason={exc}")
-                LOGGER.warning(
-                    "Could not materialize correlation source from S3 host=%s key=%s reason=%s",
-                    host_id,
-                    key,
-                    exc,
-                    extra={"category": "FILES", "correlation_id": correlation_id},
-                )
+            
+            LOGGER.info(
+                "Correlation source materialized from S3 host=%s key=%s local=%s",
+                host_id,
+                key,
+                target,
+                extra={"category": "FILES", "correlation_id": correlation_id},
+            )
+        except Exception as exc:
+            add_log(f"WARN: Could not process S3 media file host={host_id} key={key} reason={exc}")
+            LOGGER.warning(
+                "Could not materialize correlation source from S3 host=%s key=%s reason=%s",
+                host_id,
+                key,
+                exc,
+                extra={"category": "FILES", "correlation_id": correlation_id},
+            )
+    
+    # Process files in parallel
+    phase_started = time.monotonic()
+    max_workers = min(10, len(tasks)) if len(tasks) > 1 else 1
+    
+    if max_workers > 1:
+        add_log(f"INFO: Processing {total_files} files with {max_workers} parallel workers")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_single_file, task): task for task in tasks}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    task = futures[future]
+                    add_log(f"ERROR: Task failed for {task[3]}: {exc}")
+    else:
+        for task in tasks:
+            process_single_file(task)
+    
     phase_elapsed = time.monotonic() - phase_started
     log_lines.append(
         f"INFO: S3 media materialization finished files_ready={len(materialized)}/{total_files} "

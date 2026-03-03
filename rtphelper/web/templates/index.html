@@ -128,6 +128,11 @@
           <button id="cleanSelectionBtn" type="button" class="selection-chip">Clean</button>
         </div>
 
+        <div id="prdFilterWarning" class="prd-filter-warning" hidden>
+          <span class="warning-icon">⚠️</span>
+          In PRD environment, it is highly recommended to use capture filters. Capturing without filters will result in significant packet loss and affect the final capture outcome. For carrier IP information, please refer to <a href="https://talkdesk.atlassian.net/wiki/spaces/UCInterconnect/pages/3609198595/Provision+and+Connection+Information" target="_blank" rel="noopener noreferrer">Carrier Details</a>.
+        </div>
+
         <label for="filter">Capture filter</label>
         <input id="filter" type="text" placeholder="example: udp or host 10.1.2.3" />
 
