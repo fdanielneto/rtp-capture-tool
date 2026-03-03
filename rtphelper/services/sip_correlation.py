@@ -459,7 +459,8 @@ def build_correlation_context(
         call_ids=all_call_ids,
         source_ip=carrier_ip,
         destination_ip=(
-            engine_ip if (direction == "inbound" and engine_ip) else final_destination_ip
+            engine_ip if (direction == "inbound" and engine_ip)
+            else (last_invite.src_ip if direction == "outbound" else final_destination_ip)
         ),
     )
     
@@ -527,7 +528,8 @@ def build_correlation_context(
             engine_ip if (direction == "inbound" and engine_ip) else core_ip
         ),
         destination_ip=(
-            core_ip if (direction == "inbound" and engine_ip) else source_ip
+            core_ip if (direction == "inbound" and engine_ip)
+            else (engine_ip if (direction == "outbound" and engine_ip) else source_ip)
         ),
     )
     
@@ -539,7 +541,12 @@ def build_correlation_context(
             packet_number=first_invite.packet_number,
             method="INVITE",
         )
-        core_ok = ok_for_last  # 200 OK comes from the final destination
+        # Find 200 OK for first_invite (from RTP Engine back to Core)
+        core_ok = _find_200ok_for_invite(call, first_invite)
+        if core_ok and not _extract_audio_port(core_ok):
+            adj_ok = _find_adjacent_200ok_with_sdp(call, core_ok)
+            if adj_ok:
+                core_ok = adj_ok
         if core_ok:
             core_leg.destination_media = MediaEndpoint(
                 rtp_ip=_extract_audio_connection_ip(core_ok) or "",
@@ -598,7 +605,10 @@ def _add_structured_logs(ctx: CorrelationContext) -> None:
         leg = ctx.carrier_leg
         ctx.log_lines.append("-" * 25)
         if ctx.rtp_engine.detected:
-            ctx.log_lines.append("LEG: CARRIER - RTP ENGINE")
+            if ctx.direction == "outbound":
+                ctx.log_lines.append("LEG: RTP ENGINE - CARRIER")
+            else:
+                ctx.log_lines.append("LEG: CARRIER - RTP ENGINE")
         else:
             ctx.log_lines.append("LEG: CARRIER")
         ctx.log_lines.append(f"  SRC IP: {leg.source_ip}")
@@ -689,13 +699,22 @@ def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[
     # Filter: ip.src == carrier_rtp_ip && udp.srcport == carrier_port
     if carrier.source_media and carrier.destination_media:
         if carrier.source_media.rtp_ip and carrier.source_media.rtp_port:
-            # Source is carrier IP and port from INVITE
+            # For OUTBOUND Phase 2: Carrier sends FROM carrier reply address (200 OK)
+            if ctx.direction == "outbound" and carrier.destination_media.rtp_ip and not for_count:
+                filter_expr = f"ip.src=={carrier.destination_media.rtp_ip} && udp.srcport=={carrier.destination_media.rtp_port}"
+            elif ctx.direction == "outbound" and carrier.destination_media.rtp_ip:
+                # OUTBOUND Phase 1: Use destination IP for counting
+                filter_expr = f"ip.dst=={carrier.destination_media.rtp_ip} && udp.srcport=={carrier.source_media.rtp_port}"
+            else:
+                # INBOUND: Source is carrier IP and port from INVITE
+                filter_expr = f"ip.src=={carrier.source_media.rtp_ip} && udp.srcport=={carrier.source_media.rtp_port}"
+            
             filters.append({
                 "step": 1,
                 "leg": "carrier->host",
                 "leg_key": "leg_carrier_rtpengine",
                 "available": True,
-                "tshark_filter": f"ip.src=={carrier.source_media.rtp_ip} && udp.srcport=={carrier.source_media.rtp_port}",
+                "tshark_filter": filter_expr,
                 "reason": None,
             })
         else:
@@ -723,12 +742,23 @@ def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[
     if carrier.source_media and carrier.destination_media:
         if carrier.destination_media.rtp_ip and carrier.destination_media.rtp_port and carrier.source_media.rtp_ip:
             if for_count:
-                # Phase 1 count: don't filter by RTP Engine IP (not yet detected)
-                filter_expr = f"udp.srcport=={carrier.destination_media.rtp_port} && ip.dst=={carrier.source_media.rtp_ip}"
+                # Phase 1 count
+                if ctx.direction == "outbound":
+                    # OUTBOUND: Carrier sends back FROM carrier IP (known)
+                    filter_expr = f"udp.srcport=={carrier.destination_media.rtp_port} && ip.src=={carrier.destination_media.rtp_ip}"
+                else:
+                    # INBOUND: don't filter by RTP Engine IP (not yet detected)
+                    filter_expr = f"udp.srcport=={carrier.destination_media.rtp_port} && ip.dst=={carrier.source_media.rtp_ip}"
             else:
-                # Phase 2 extract: use actual RTP Engine IP, omit destination IP
-                rtpengine_ip = get_rtpengine_ip_for_filter(carrier.destination_media.rtp_ip)
-                filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={carrier.destination_media.rtp_port}"
+                # Phase 2 extract
+                if ctx.direction == "outbound":
+                    # OUTBOUND: RTP Engine IP is in carrier.source_media (announced in INVITE to carrier)
+                    rtpengine_ip = get_rtpengine_ip_for_filter(carrier.source_media.rtp_ip)
+                    filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={carrier.source_media.rtp_port}"
+                else:
+                    # INBOUND: use actual RTP Engine IP, omit destination IP
+                    rtpengine_ip = get_rtpengine_ip_for_filter(carrier.destination_media.rtp_ip)
+                    filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={carrier.destination_media.rtp_port}"
             
             filters.append({
                 "step": 2,
@@ -763,12 +793,23 @@ def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[
     if core.source_media and core.destination_media:
         if core.source_media.rtp_ip and core.source_media.rtp_port and core.destination_media.rtp_ip:
             if for_count:
-                # Phase 1 count: don't filter by RTP Engine IP (not yet detected)
-                filter_expr = f"udp.srcport=={core.source_media.rtp_port} && ip.dst=={core.destination_media.rtp_ip}"
+                # Phase 1 count
+                if ctx.direction == "outbound":
+                    # OUTBOUND: Core sends FROM core IP (known)
+                    filter_expr = f"udp.srcport=={core.source_media.rtp_port} && ip.src=={core.source_media.rtp_ip}"
+                else:
+                    # INBOUND: don't filter by RTP Engine IP (not yet detected)
+                    filter_expr = f"udp.srcport=={core.source_media.rtp_port} && ip.dst=={core.destination_media.rtp_ip}"
             else:
-                # Phase 2 extract: use actual RTP Engine IP, omit destination IP
-                rtpengine_ip = get_rtpengine_ip_for_filter(core.source_media.rtp_ip)
-                filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={core.source_media.rtp_port}"
+                # Phase 2 extract
+                if ctx.direction == "outbound":
+                    # OUTBOUND: RTP Engine IP is in core.destination_media (announced in 200 OK to core)
+                    rtpengine_ip = get_rtpengine_ip_for_filter(core.destination_media.rtp_ip)
+                    filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={core.destination_media.rtp_port}"
+                else:
+                    # INBOUND: use actual RTP Engine IP, omit destination IP
+                    rtpengine_ip = get_rtpengine_ip_for_filter(core.source_media.rtp_ip)
+                    filter_expr = f"ip.src=={rtpengine_ip} && udp.srcport=={core.source_media.rtp_port}"
         else:
             filter_expr = None
         
@@ -804,8 +845,15 @@ def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[
     # Filter: ip.src == core_ip && udp.srcport == core_port
     if core.source_media and core.destination_media:
         if core.destination_media.rtp_ip and core.destination_media.rtp_port:
-            # Core's IP and port from 200 OK
-            filter_expr = f"ip.src=={core.destination_media.rtp_ip} && udp.srcport=={core.destination_media.rtp_port}"
+            # For OUTBOUND Phase 2: Core sends FROM core original address (INVITE)
+            if ctx.direction == "outbound" and core.source_media.rtp_ip and not for_count:
+                filter_expr = f"ip.src=={core.source_media.rtp_ip} && udp.srcport=={core.source_media.rtp_port}"
+            elif ctx.direction == "outbound" and core.source_media.rtp_ip:
+                # OUTBOUND Phase 1: Use destination IP for counting
+                filter_expr = f"ip.dst=={core.source_media.rtp_ip} && udp.srcport=={core.destination_media.rtp_port}"
+            else:
+                # INBOUND: Core's IP and port from 200 OK
+                filter_expr = f"ip.src=={core.destination_media.rtp_ip} && udp.srcport=={core.destination_media.rtp_port}"
         else:
             filter_expr = None
         

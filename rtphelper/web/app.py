@@ -40,7 +40,6 @@ from rtphelper.services.sip_correlation import (
     merge_calls_by_group,
     build_correlation_context,
     build_tshark_filters,
-    detect_rtpengine_ip_from_pcap,
     CorrelationContext,
 )
 from rtphelper.services.correlation_progress import emit_progress
@@ -1725,11 +1724,16 @@ async def correlate(
     # for line in endpoint_debug:
     #     log_lines.append(f"INFO: {line}")
 
-    # Detect actual RTP Engine IP from PCAP files per instance (if RTP Engine is present)
-    rtpengine_ip_per_instance: Dict[str, str] = {}  # Maps instance_id -> detected_ip
+    # Map media capture files to RTP Engine hosts (if RTP Engine is present)
+    rtpengine_ip_per_instance: Dict[str, str] = {}  # Maps instance_id -> host_ip
     if correlation_ctx and correlation_ctx.rtp_engine.detected:
-        log_lines.append(_format_log_banner("RTP Engine IP Detection"))
-        log_lines.append("INFO: RTP Engine detected in SIP signaling. Detecting actual IP per instance from capture files...")
+        log_lines.append(_format_log_banner("Media Capture Files Mapping"))
+        log_lines.append("INFO: RTP Engine detected in SIP signaling:")
+        log_lines.append(f"INFO:   XCC signaling IP: {correlation_ctx.rtp_engine.xcc_ip or 'N/A'} (packet {correlation_ctx.rtp_engine.sdp_change_packet or 'N/A'})")
+        log_lines.append(f"INFO:   RTP IP announced in SDP: {correlation_ctx.rtp_engine.changed_sdp_ip or 'N/A'}")
+        if correlation_ctx.rtp_engine.original_sdp_ip:
+            log_lines.append(f"INFO:   Original RTP IP: {correlation_ctx.rtp_engine.original_sdp_ip}")
+        log_lines.append("INFO: Mapping capture files to RTP Engine hosts...")
         
         # Get media PCAPs for detection
         temp_media_pcaps = _materialize_media_pcaps_for_correlation(session, call_cid, [])
@@ -1759,43 +1763,72 @@ async def correlate(
             pcap_groups = _group_pcaps_by_rtp_instance(temp_media_pcaps)
             log_lines.append(f"INFO: Found {len(pcap_groups)} RTP Engine instance group(s)")
             
-            # Detect IP for each RTP Engine instance
+            # Map each RTP Engine instance to its host IP via config lookup
             for instance_id, instance_pcaps in sorted(pcap_groups.items()):
                 if instance_id is None:
-                    log_lines.append(f"INFO: Skipping {len(instance_pcaps)} file(s) without RTP Engine instance identifier")
+                    skipped_names = [p.name for p in instance_pcaps]
+                    log_lines.append(f"INFO: Skipping {len(instance_pcaps)} file(s) without RTP Engine instance identifier:")
+                    for name in skipped_names:
+                        log_lines.append(f"INFO:   - {name}")
                     continue
                 
-                log_lines.append(f"INFO: Processing instance '{instance_id}' with {len(instance_pcaps)} file(s)")
+                log_lines.append(f"INFO: Mapping instance '{instance_id}' ({len(instance_pcaps)} file(s))")
                 
-                # Try to detect from first few files of this instance
+                # Try to extract host_id from filename and lookup in config
                 detected_ip = None
                 for pcap_file in instance_pcaps[:3]:  # Check first 3 files of this instance
-                    detected_ip = detect_rtpengine_ip_from_pcap(
-                        pcap_file,
-                        carrier_ips=carrier_ips,
-                        core_ips=core_ips,
-                        max_packets=5,
-                    )
+                    host_id = _extract_host_id_from_filename(pcap_file.name)
+                    if host_id:
+                        # Search for host in config across all environments/regions
+                        for env_name, env_cfg in CAPTURE_SERVICE._config.environments.items():
+                            for region_name, region_cfg in env_cfg.regions.items():
+                                for sub_region_name, sub_region_cfg in region_cfg.sub_regions.items():
+                                    for host in sub_region_cfg.hosts:
+                                        if host.id.lower() == host_id:
+                                            # Found host, resolve its address via DNS if needed
+                                            from rtphelper.dns_resolver import resolve_host
+                                            try:
+                                                detected_ip = resolve_host(host.address)
+                                                rtpengine_ip_per_instance[instance_id] = detected_ip
+                                                log_lines.append(f"INFO:   → host={host_id}, address={host.address}, IP={detected_ip}")
+                                            except ValueError as e:
+                                                # DNS resolution failed - stop correlation and require VPN access
+                                                error_msg = (
+                                                    f"DNS resolution failed for host '{host_id}' (address={host.address}).\n"
+                                                    f"This is an internal AWS hostname not accessible from your local machine.\n"
+                                                    f"\n"
+                                                    f"SOLUTION: Connect to AWS VPN first, then retry the correlation.\n"
+                                                    f"          Once connected, internal .aws.prv.talkdeskapp.com hostnames will resolve correctly."
+                                                )
+                                                log_lines.append(f"ERROR: {error_msg}")
+                                                raise ValueError(error_msg) from e
+                                            break
+                                    if detected_ip:
+                                        break
+                                if detected_ip:
+                                    break
+                            if detected_ip:
+                                break
                     if detected_ip:
-                        rtpengine_ip_per_instance[instance_id] = detected_ip
-                        log_lines.append(f"INFO:   Instance '{instance_id}' IP detected: {detected_ip} (from {pcap_file.name})")
                         break
                 
                 if not detected_ip:
-                    log_lines.append(f"WARN:   Could not detect IP for instance '{instance_id}', will use SDP-announced IP")
+                    log_lines.append(f"WARN:   Could not map instance '{instance_id}' to host IP, will use SDP-announced IP")
             
-            # Log comparison with SDP announced IP
+            # Summary of mapping
             if rtpengine_ip_per_instance:
-                log_lines.append(f"INFO: SDP announced IP: {correlation_ctx.rtp_engine.changed_sdp_ip}")
-                unique_detected_ips = set(rtpengine_ip_per_instance.values())
-                if len(unique_detected_ips) > 1:
-                    log_lines.append(f"INFO: Multiple RTP Engine IPs detected: {', '.join(sorted(unique_detected_ips))}")
-                elif unique_detected_ips and list(unique_detected_ips)[0] != correlation_ctx.rtp_engine.changed_sdp_ip:
-                    log_lines.append(f"INFO: IP mismatch detected - using actual IPs in filters")
+                unique_host_ips = set(rtpengine_ip_per_instance.values())
+                log_lines.append(f"INFO: Successfully mapped {len(rtpengine_ip_per_instance)} instance(s) to {len(unique_host_ips)} unique host IP(s)")
+                if len(unique_host_ips) > 1:
+                    log_lines.append(f"INFO: Multiple hosts detected: {', '.join(sorted(unique_host_ips))}")
+                # Compare with SDP announced IP (informational only)
+                sdp_announced = correlation_ctx.rtp_engine.changed_sdp_ip
+                if sdp_announced and sdp_announced not in unique_host_ips:
+                    log_lines.append(f"INFO: Note: SDP announced IP ({sdp_announced}) differs from individual host IPs (expected for load-balanced setups)")
             else:
-                log_lines.append("WARN: No RTP Engine IPs detected from any instance")
+                log_lines.append("WARN: Could not map any instances to host IPs, will use SDP-announced IP")
         else:
-            log_lines.append("WARN: No media PCAPs available for RTP Engine IP detection")
+            log_lines.append("WARN: No media PCAPs available for mapping")
 
     # Apply RTP filters per PCAP file using instance-specific IPs
     log_lines.append(_format_log_banner("Step 3: Apply RTP filters"))
@@ -1803,9 +1836,9 @@ async def correlate(
     log_lines.append(f"INFO: Media capture files available: {len(media_pcaps)}")
     
     if rtpengine_ip_per_instance:
-        log_lines.append("INFO: Using per-instance RTP Engine IP detection for filters")
+        log_lines.append("INFO: Using per-instance host IPs from config for RTP filters")
     else:
-        log_lines.append("INFO: Using standard filter construction (no instance detection)")
+        log_lines.append("INFO: Using SDP-announced IP for RTP filters")
 
     step_results: List[Dict[str, object]] = []
     combined_dir = session.base_dir / "combined"
@@ -1956,13 +1989,6 @@ async def correlate(
     add_log_line("INFO: Starting streaming pipeline - all legs will process in parallel")
     add_log_line(f"INFO: Phase 2 workers configured: {max_workers}")
     
-    # Build example extraction filters for logging (with first detected IP if available)
-    # These are for display only - actual filters are rebuilt per-file with correct IPs
-    first_rtpengine_ip = next(iter(rtpengine_ip_per_instance.values())) if rtpengine_ip_per_instance else None
-    extract_steps_example = build_tshark_filters(correlation_ctx, first_rtpengine_ip, for_count=False)
-    # Create lookup map by step number for easy access
-    extract_steps_map = {int(s["step"]): s for s in extract_steps_example}
-    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit ALL tasks immediately (streaming pipeline)
         # Tasks from all 4 legs compete for workers - no waiting between legs
@@ -1978,16 +2004,22 @@ async def correlate(
                 add_log_line(f"INFO: Leg {leg_label} (step {step_num}): SKIPPED - {step_info.get('reason', 'unavailable')}")
                 continue
             
-            # Log filter for this leg (use extraction filter example, not count filter)
-            extract_step = extract_steps_map.get(step_num, step_info)
-            filter_expr = extract_step.get("tshark_filter", "(no filter)")
-            add_log_line(f"INFO: [{leg_label}] Filter: {filter_expr}")
-            
             # Submit only files with traffic (from phase 1 pre-filtering)
             for pcap_file in files_with_traffic.keys():
                 instance_id = _extract_rtp_engine_instance(pcap_file.name)
                 rtpengine_actual_ip = rtpengine_ip_per_instance.get(instance_id) if instance_id else None
 
+                # Rebuild filter with instance-specific IP for accurate logging
+                if rtpengine_actual_ip:
+                    instance_steps = build_tshark_filters(correlation_ctx, rtpengine_actual_ip, for_count=False)
+                    instance_step = next((s for s in instance_steps if int(s["step"]) == step_num), None)
+                    filter_expr = instance_step.get("tshark_filter", "(no filter)") if instance_step else "(no filter)"
+                else:
+                    filter_expr = step_info.get("tshark_filter", "(no filter)")
+
+                add_log_line(
+                    f"INFO: [{leg_label}] Filter for {pcap_file.name}: {filter_expr}"
+                )
                 add_log_line(
                     f"INFO: Queued [{leg_label}] for processing file {pcap_file.name}"
                 )
@@ -3262,27 +3294,53 @@ def _detected_leg_details(
     }
 
 
+def _extract_host_id_from_filename(filename: str) -> Optional[str]:
+    """
+    Extract host_id from capture filename.
+    
+    Filenames follow pattern: {sub_region}-{host_id}-{seq}.pcap
+    Examples:
+        us-east-1-prd-us-east-1-rtp-1-0001.pcap -> "prd-us-east-1-rtp-1"
+        us-east-1-prd-use1-rtpengine-1-0001.pcap -> "prd-use1-rtpengine-1"
+        eu-west-1-prd-eu-west-1-rtp-3-0042.pcap -> "prd-eu-west-1-rtp-3"
+        carrier-file.pcap -> None
+        
+    Returns:
+        The host_id or None if pattern doesn't match
+    """
+    import re
+    # Match pattern: {sub_region}-{host_id}-{seq}.pcap
+    # The host_id typically contains environment prefix (prd/qa/stg) and RTP instance (rtp-N or rtpengine-N)
+    # Pattern: {region}-(prd|qa|stg)-{region}-(rtp|rtpengine)-{N}-{seq}
+    pattern = r'^[a-z]+-[a-z]+-\d+-((prd|qa|stg)-[a-z0-9]+-(?:rtp|rtpengine)-\d+)-\d+\.pcap$'
+    match = re.search(pattern, filename, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return None
+
+
 def _extract_rtp_engine_instance(filename: str) -> Optional[str]:
     """
     Extract RTP Engine instance identifier from filename including region.
     
     Examples:
         us-east-1-prd-us-east-1-rtp-1-0001.pcap -> "us-east-1:rtp-1"
-        us-west-2-prd-us-east-1-rtp-2-0123.pcap -> "us-west-2:rtp-2"
-        eu-west-1-prd-eu-west-1-rtp-3-0001.pcap -> "eu-west-1:rtp-3"
+        us-east-1-prd-use1-rtpengine-1-0001.pcap -> "us-east-1:rtpengine-1"
+        us-west-2-qa-us-west-2-rtp-2-0123.pcap -> "us-west-2:rtp-2"
+        eu-west-1-stg-eu-west-1-rtpengine-3-0001.pcap -> "eu-west-1:rtpengine-3"
         some-other-file.pcap -> None
         
     Returns:
         The RTP Engine instance identifier with region (e.g., "us-east-1:rtp-1") or None
     """
     import re
-    # Match pattern: {region}-prd-{anything}-rtp-{number}
-    # Captures region at start and rtp-{number} pattern
-    pattern = r'^([a-z]+-[a-z]+-\d+)-prd-.*?(rtp-\d+)'
+    # Match pattern: {region}-(prd|qa|stg)-{anything}-(rtp|rtpengine)-{number}
+    # Captures region at start and (rtp|rtpengine)-{number} pattern
+    pattern = r'^([a-z]+-[a-z]+-\d+)-(prd|qa|stg)-.*?((?:rtp|rtpengine)-\d+)'
     match = re.search(pattern, filename, re.IGNORECASE)
     if match:
         region = match.group(1).lower()
-        rtp_instance = match.group(2).lower()
+        rtp_instance = match.group(3).lower()
         return f"{region}:{rtp_instance}"
     return None
 

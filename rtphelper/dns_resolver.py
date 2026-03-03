@@ -26,8 +26,8 @@ _IP_PATTERN = re.compile(
 # DNS resolution cache: hostname -> (ip, timestamp)
 _DNS_CACHE: Dict[str, Tuple[str, float]] = {}
 
-# Cache TTL in seconds (default 60s, configurable via environment)
-_DEFAULT_CACHE_TTL = 60.0
+# Cache TTL in seconds (default 1h, configurable via environment)
+_DEFAULT_CACHE_TTL = 3600.0
 _CACHE_TTL = float(os.environ.get("RTPHELPER_DNS_CACHE_TTL", str(_DEFAULT_CACHE_TTL)))
 
 # DNS resolution timeout in seconds

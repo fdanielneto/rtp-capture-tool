@@ -101,7 +101,7 @@ class RpcapClient:
         self._open_info = RpcapOpenInfo(linktype=linktype, tzoff=tzoff)
         return self._open_info
 
-    def set_filter(self, filter_expr: str, snaplen: int = 262144) -> None:
+    def set_filter(self, filter_expr: str, snaplen: int = 2048) -> None:
         if not filter_expr:
             return
         if self._open_info is None:
@@ -118,7 +118,7 @@ class RpcapClient:
 
     def start_capture(
         self,
-        snaplen: int = 262144,
+        snaplen: int = 2048,
         read_timeout_ms: int = 1000,
         promisc: bool = True,
         filter_expr: str | None = "",

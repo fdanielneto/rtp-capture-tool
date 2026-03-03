@@ -856,8 +856,9 @@ button:disabled {
 }
 
 .raw-files-grid {
-  column-count: 3;
-  column-gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
 }
 
 .raw-host-card {
@@ -865,10 +866,6 @@ button:disabled {
   border-radius: 10px;
   background: rgba(10, 25, 45, 0.35);
   padding: 10px 12px;
-  display: inline-block;
-  width: 100%;
-  margin: 0 0 12px;
-  break-inside: avoid;
 }
 
 .raw-host-card h4 {
@@ -1205,4 +1202,17 @@ code {
 
 #leaveAndCancelBtn {
   background: rgba(220, 38, 38, 0.9);
+}
+
+/* Responsive grid for raw files cards */
+@media (max-width: 1024px) {
+  .raw-files-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .raw-files-grid {
+    grid-template-columns: 1fr;
+  }
 }
