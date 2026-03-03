@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Test Raw Files Visibility</title>
+    <style>
+        body {
+            background: #1a1d29;
+            color: #bed5f9;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            padding: 20px;
+        }
+        .panel {
+            background: #252936;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .panel[hidden] {
+            display: none;
+        }
+        #rawFiles {
+            margin-top: 24px;
+            color: #bed5f9;
+            font-size: 14px;
+        }
+        #rawFiles[hidden] {
+            display: none;
+        }
+        details {
+            margin: 10px 0;
+        }
+        summary {
+            cursor: pointer;
+            font-weight: bold;
+        }
+        ul {
+            list-style: none;
+            padding-left: 20px;
+        }
+        li {
+            margin: 5px 0;
+        }
+        a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .test-info {
+            background: #2d3748;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧪 Test Raw Files Visibility</h1>
+    
+    <div class="test-info">
+        <h3>Test Controls</h3>
+        <button onclick="showRawFiles()">Show Raw Files (hidden=false)</button>
+        <button onclick="hideRawFiles()">Hide Raw Files (hidden=true)</button>
+        <button onclick="renderSampleFiles()">Render Sample Files</button>
+        <button onclick="clearRawFiles()">Clear Raw Files</button>
+        <button onclick="togglePostSection()">Toggle postSection</button>
+        <div id="status" style="margin-top: 10px; font-weight: bold;"></div>
+    </div>
+
+    <section class="panel" id="postSection">
+        <h3>Correlate Call (SIP -> RTP/SRTP)</h3>
+        <p>This section simulates the post-capture panel.</p>
+        <div id="rawFiles"></div>
+    </section>
+
+    <div class="test-info">
+        <h3>Debug Info</h3>
+        <pre id="debugInfo"></pre>
+    </div>
+
+    <script>
+        const postSection = document.getElementById('postSection');
+        const rawFiles = document.getElementById('rawFiles');
+        const status = document.getElementById('status');
+        const debugInfo = document.getElementById('debugInfo');
+
+        function updateDebugInfo() {
+            const info = {
+                'postSection.hidden': postSection.hidden,
+                'postSection computed display': window.getComputedStyle(postSection).display,
+                'rawFiles.hidden': rawFiles.hidden,
+                'rawFiles computed display': window.getComputedStyle(rawFiles).display,
+                'rawFiles computed visibility': window.getComputedStyle(rawFiles).visibility,
+                'rawFiles.innerHTML length': rawFiles.innerHTML.length,
+                'rawFiles.innerHTML preview': rawFiles.innerHTML.substring(0, 100)
+            };
+            debugInfo.textContent = JSON.stringify(info, null, 2);
+        }
+
+        function showRawFiles() {
+            rawFiles.hidden = false;
+            rawFiles.style.display = '';
+            rawFiles.style.visibility = 'visible';
+            status.textContent = '✅ rawFiles.hidden = false (should be visible)';
+            updateDebugInfo();
+        }
+
+        function hideRawFiles() {
+            rawFiles.hidden = true;
+            status.textContent = '❌ rawFiles.hidden = true (should be hidden)';
+            updateDebugInfo();
+        }
+
+        function renderSampleFiles() {
+            const sampleData = {
+                'prd-use1-rtpengine-1': [
+                    '/downloads/20260302_170615/raw/rtp-prd-use1-rtpengine-1-0001.pcap',
+                    '/downloads/20260302_170615/raw/rtp-prd-use1-rtpengine-1-0002.pcap'
+                ],
+                'prd-usw2-rtpengine-1': [
+                    '/downloads/20260302_170615/raw/rtp-prd-usw2-rtpengine-1-0001.pcap'
+                ]
+            };
+
+            let html = '<p>Files are stored in: <code>/Users/fdanielneto/Downloads/test1-cmh/20260302_170615</code></p>';
+            html += '<h4>Captured RTP Files</h4>';
+
+            for (const [hostId, links] of Object.entries(sampleData)) {
+                html += `<details open><summary><strong>${hostId}</strong> (${links.length} file${links.length !== 1 ? 's' : ''})</summary>`;
+                html += '<ul class="raw-files-list">';
+                for (const link of links) {
+                    const fileName = link.split('/').pop();
+                    html += `<li><a href="${link}" target="_blank">${fileName}</a></li>`;
+                }
+                html += '</ul></details>';
+            }
+
+            rawFiles.innerHTML = html;
+            rawFiles.hidden = false;
+            rawFiles.style.display = '';
+            rawFiles.style.visibility = 'visible';
+            status.textContent = '✅ Rendered sample files';
+            updateDebugInfo();
+        }
+
+        function clearRawFiles() {
+            rawFiles.innerHTML = '';
+            status.textContent = '⚠️ Cleared raw files';
+            updateDebugInfo();
+        }
+
+        function togglePostSection() {
+            postSection.hidden = !postSection.hidden;
+            status.textContent = `postSection.hidden = ${postSection.hidden}`;
+            updateDebugInfo();
+        }
+
+        // Initial render
+        renderSampleFiles();
+        updateDebugInfo();
+        setInterval(updateDebugInfo, 2000);
+    </script>
+</body>
+</html>
