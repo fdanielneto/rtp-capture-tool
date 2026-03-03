@@ -1,3 +1,4 @@
+# Python environment
 .venv/
 __pycache__/
 *.pyc
@@ -5,16 +6,16 @@ __pycache__/
 *.pyd
 .pytest_cache/
 
-# Local outputs
+# Local outputs and test data
 captures/
 e2e-tests/
 logs/
 output/
 build/
-mockup*
 
-# Local config
-config/
+# Local configuration (secrets, env-specific)
+config/hosts.yaml
+config/runtime.env
 
 # Packaging artifacts
 *.egg-info/
@@ -23,3 +24,12 @@ wheelhouse/
 
 # macOS
 .DS_Store
+
+# Documentation and planning (internal)
+docs/
+REFACTORING_IMPLEMENTATION_SUMMARY.md
+
+# Test/backup scripts
+scripts/*copy*.py
+scripts/backup/
+mockup*

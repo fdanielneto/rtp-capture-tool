@@ -58,16 +58,6 @@ class RpcapClient:
     def connect(self) -> None:
         if self._sock is not None:
             return
-        if self._host != self._host_original:
-            LOGGER.debug(
-                "Connecting rpcap host=%s (resolved from %s) port=%s",
-                self._host,
-                self._host_original,
-                self._port,
-                extra={"category": "CAPTURE"},
-            )
-        else:
-            LOGGER.debug("Connecting rpcap host=%s port=%s", self._host, self._port, extra={"category": "CAPTURE"})
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
         sock.settimeout(self._timeout)
         self._sock = sock
@@ -91,7 +81,6 @@ class RpcapClient:
 
     def auth_null(self) -> None:
         self._ensure_connected()
-        LOGGER.debug("RPCAP auth null host=%s", self._host, extra={"category": "CAPTURE"})
         self._send(RPCAP_MSG_AUTH_REQ, 0, pack_auth_null())
         msg_type, value, payload = self._recv_msg()
         if msg_type == RPCAP_MSG_ERROR:
@@ -101,7 +90,6 @@ class RpcapClient:
 
     def open(self, device: str) -> RpcapOpenInfo:
         self._ensure_connected()
-        LOGGER.debug("RPCAP open host=%s device=%s", self._host, device, extra={"category": "CAPTURE"})
         payload = pack_open_req(device)
         self._send(RPCAP_MSG_OPEN_REQ, 0, payload)
         msg_type, value, reply = self._recv_msg()
@@ -119,7 +107,6 @@ class RpcapClient:
         if self._open_info is None:
             raise RuntimeError("RPCAP device must be opened before setting filter")
 
-        LOGGER.debug("RPCAP set filter host=%s expr=%s snaplen=%s", self._host, filter_expr, snaplen, extra={"category": "CAPTURE"})
         insns = compile_bpf(filter_expr, linktype=self._open_info.linktype, snaplen=snaplen)
         payload = pack_bpf_program(RPCAP_UPDATEFILTER_BPF, insns)
         self._send(RPCAP_MSG_UPDATEFILTER_REQ, 0, payload)
@@ -137,15 +124,6 @@ class RpcapClient:
         filter_expr: str | None = "",
     ) -> None:
         self._ensure_connected()
-        LOGGER.debug(
-            "RPCAP start capture host=%s snaplen=%s timeout_ms=%s promisc=%s filter=%s",
-            self._host,
-            snaplen,
-            read_timeout_ms,
-            promisc,
-            filter_expr,
-            extra={"category": "CAPTURE"},
-        )
         flags = RPCAP_STARTCAPREQ_FLAG_PROMISC if promisc else 0
         if self._open_info is None:
             raise RuntimeError("RPCAP device must be opened before starting capture")

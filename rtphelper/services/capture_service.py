@@ -19,6 +19,8 @@ from rtphelper.config_loader import AppConfig, HostConfig
 from rtphelper.logging_setup import short_uuid
 from rtphelper.rpcap.frame_normalizer import normalize_link_layer_frame
 from rtphelper.rpcap.pcap_writer import RollingPcapWriter
+from rtphelper.services.priority_executor import PriorityLevel, PriorityThreadPoolExecutor
+from rtphelper.services.s3_coordinator import S3UploadCoordinator, UploadPhase
 from rtphelper.size_parser import parse_size_bytes
 from rtphelper.services.rpcap_client import RpcapClient
 from rtphelper.services.s3_storage import S3CaptureStorage, S3Config
@@ -75,7 +77,7 @@ def _rolling_pcap_max_seconds() -> int:
 class HostCaptureWorker:
     host: HostConfig
     interface: str
-    thread: threading.Thread
+    thread: threading.Thread  # Kept for compatibility, deprecated
 
 
 @dataclass
@@ -137,17 +139,21 @@ class CaptureService:
         self._s3 = S3CaptureStorage(self._storage_cfg)
         self._active_session: Optional[CaptureSession] = None
         self._latest_session: Optional[CaptureSession] = None
+        # Priority executor for all workers
+        self._executor = PriorityThreadPoolExecutor(max_workers=16)
+        # S3 upload coordinator with priority scheduling
+        self._s3_coordinator = S3UploadCoordinator(self._s3, self._executor)
         self._maintenance_threads: Dict[str, threading.Thread] = {}
         self._sessions_by_id: Dict[str, CaptureSession] = {}
         self._storage_flush_queue: queue.Queue[str] = queue.Queue()
         self._storage_flush_queue_seen: set[str] = set()
         self._storage_flush_stop = threading.Event()
-        self._storage_flush_worker = threading.Thread(
-            target=self._storage_flush_loop,
+        # Submit storage flush worker with MEDIUM priority (post-capture)
+        self._executor.submit(
+            self._storage_flush_loop,
+            priority=PriorityLevel.MEDIUM,
             name="storage-flush-worker",
-            daemon=True,
         )
-        self._storage_flush_worker.start()
         self._s3_journal_path = Path("logs/s3_upload_journal.json")
         self._s3_journal_lock = threading.Lock()
         self._s3_journal: Dict[str, Dict[str, object]] = {}
@@ -162,15 +168,13 @@ class CaptureService:
         self._flush_pending_last_logged: Dict[str, int] = {}
         self._flush_pending_last_log_at: Dict[str, float] = {}
         self._load_s3_journal()
-        self._s3_journal_workers: List[threading.Thread] = []
+        # Submit S3 journal workers with LOW priority (background maintenance)
         for idx in range(S3_UPLOAD_WORKERS_MAX):
-            worker = threading.Thread(
-                target=self._s3_journal_loop,
+            self._executor.submit(
+                self._s3_journal_loop,
+                priority=PriorityLevel.LOW,
                 name=f"s3-journal-worker-{idx + 1}",
-                daemon=True,
             )
-            worker.start()
-            self._s3_journal_workers.append(worker)
         self._reachability_lock = threading.Lock()
         self._reachability_at: float = 0.0
         self._reachability_at_by_env: Dict[str, float] = {}
@@ -228,12 +232,6 @@ class CaptureService:
                 return
             self._s3_upload_limit = target
             self._s3_upload_cond.notify_all()
-        LOGGER.info(
-            "S3 upload concurrency mode updated capture_running=%s limit=%s",
-            capture_running,
-            target,
-            extra={"category": "CONFIG"},
-        )
 
     def _acquire_s3_upload_slot(self) -> bool:
         with self._s3_upload_cond:
@@ -341,14 +339,6 @@ class CaptureService:
         if self._flush_summary_last.get(session.session_id) == snapshot:
             return
         self._flush_summary_last[session.session_id] = snapshot
-        LOGGER.info(
-            "S3 flush cycle summary session_id=%s pending=%s uploading=%s completed=%s",
-            session.session_id,
-            pending,
-            uploading,
-            completed,
-            extra={"category": "FILES", "correlation_id": session.session_id},
-        )
 
     def _enqueue_storage_flush(self, session: CaptureSession, source: str) -> None:
         if session.storage_mode != "s3":
@@ -377,7 +367,6 @@ class CaptureService:
         )
 
     def _storage_flush_loop(self) -> None:
-        LOGGER.info("Started storage flush worker", extra={"category": "CONFIG"})
         while not self._storage_flush_stop.is_set():
             try:
                 session_id = self._storage_flush_queue.get(timeout=1.0)
@@ -440,7 +429,7 @@ class CaptureService:
                         )
                         self._flush_pending_last_logged[session.session_id] = pending
                         self._flush_pending_last_log_at[session.session_id] = now_ts
-                    time.sleep(0.5)
+                    self._storage_flush_stop.wait(0.5)
                     continue
                 if failed_count > 0:
                     session.storage_flush_state = "failed"
@@ -487,8 +476,7 @@ class CaptureService:
                     exc,
                     extra={"category": "FILES", "correlation_id": session.session_id},
                 )
-                time.sleep(2.0)
-        LOGGER.info("Stopped storage flush worker", extra={"category": "CONFIG"})
+                self._storage_flush_stop.wait(2.0)
 
     def storage_flush_status(self, session: CaptureSession) -> Dict[str, object]:
         failed_files = self._session_journal_failed_count(session.session_id)
@@ -659,15 +647,13 @@ class CaptureService:
                     self._save_s3_journal()
 
         _normalize_uploading_entries()
+        # Signal workers to stop (they check _storage_flush_stop and _s3_journal_stop)
         self._storage_flush_stop.set()
-        if self._storage_flush_worker.is_alive():
-            self._storage_flush_worker.join(timeout=2.0)
         self._s3_journal_stop.set()
         with self._s3_upload_cond:
             self._s3_upload_cond.notify_all()
-        for worker in self._s3_journal_workers:
-            if worker.is_alive():
-                worker.join(timeout=2.0)
+        # Shutdown priority executor gracefully
+        self._executor.shutdown(wait=True, timeout=10.0)
         _normalize_uploading_entries()
 
     def _load_s3_journal(self) -> None:
@@ -693,13 +679,6 @@ class CaptureService:
                     status = "pending"
             if dirty:
                 self._save_s3_journal()
-            if self._s3_journal:
-                LOGGER.info(
-                    "Loaded S3 upload journal entries=%s pending=%s (auto-resume disabled)",
-                    len(self._s3_journal),
-                    sum(1 for v in self._s3_journal.values() if str(v.get("status", "pending")).lower() == "pending"),
-                    extra={"category": "FILES"},
-                )
         except Exception as exc:
             LOGGER.warning("Could not load S3 upload journal reason=%s", exc, extra={"category": "FILES"})
             self._s3_journal = {}
@@ -773,7 +752,6 @@ class CaptureService:
             self._save_s3_journal()
 
     def _s3_journal_loop(self) -> None:
-        LOGGER.info("Started S3 journal worker", extra={"category": "CONFIG"})
         while not self._s3_journal_stop.is_set():
             try:
                 local_path = self._s3_journal_queue.get(timeout=1.0)
@@ -782,7 +760,7 @@ class CaptureService:
             self._s3_journal_seen.discard(local_path)
             if not self._s3.enabled or not self._s3.configured:
                 self._enqueue_s3_journal_entry(local_path)
-                time.sleep(1.0)
+                self._s3_journal_stop.wait(1.0)
                 continue
             with self._s3_journal_lock:
                 entry = dict(self._s3_journal.get(local_path, {}))
@@ -827,10 +805,25 @@ class CaptureService:
                 session = self._sessions_by_id.get(session_id)
                 if session is not None:
                     session.storage_flush_current_file = local.name
+                
+                # Determine upload phase based on session state
+                phase = UploadPhase.ROLLING if (session and session.running) else UploadPhase.FLUSH
+                
                 upload_started_at = time.monotonic()
-                self._s3.upload_file(local, relative_file)
+                # Use S3 coordinator for prioritized uploads
+                job = self._s3_coordinator.submit(
+                    local_path=local,
+                    relative_file=relative_file,
+                    phase=phase,
+                    session_id=session_id,
+                )
+                result = self._s3_coordinator.wait_for_job(job, timeout=300.0)
+                
+                if not result.success:
+                    raise Exception(result.error or "Upload failed")
+                
                 upload_elapsed_s = max(0.001, time.monotonic() - upload_started_at)
-                key = self._s3.to_s3_key(relative_file)
+                key = result.s3_key or self._s3.to_s3_key(relative_file)
                 try:
                     st = local.stat()
                     fingerprint = (int(st.st_size), int(st.st_mtime_ns))
@@ -870,21 +863,6 @@ class CaptureService:
                     upload_mbps,
                     extra={"category": "FILES", "correlation_id": session_id or "-"},
                 )
-                if deleted_local:
-                    LOGGER.info(
-                        "raw segment uploaded+purged event=raw_segment_uploaded_purged session_id=%s file=%s key=%s",
-                        session_id or "-",
-                        local.name,
-                        key,
-                        extra={"category": "FILES", "correlation_id": session_id or "-"},
-                    )
-                LOGGER.info(
-                    "S3 upload committed session_id=%s file=%s key=%s",
-                    session_id or "-",
-                    local.name,
-                    key,
-                    extra={"category": "FILES", "correlation_id": session_id or "-"},
-                )
             except Exception as exc:
                 with self._s3_journal_lock:
                     curr = self._s3_journal.get(local_path, {})
@@ -917,7 +895,7 @@ class CaptureService:
                         extra={"category": "FILES", "correlation_id": session_id or "-"},
                     )
                 else:
-                    time.sleep(1.0)
+                    self._s3_journal_stop.wait(1.0)
                     self._enqueue_s3_journal_entry(local_path)
             finally:
                 try:
@@ -927,7 +905,6 @@ class CaptureService:
                     pass
                 if acquired_slot:
                     self._release_s3_upload_slot()
-        LOGGER.info("Stopped S3 journal worker", extra={"category": "CONFIG"})
 
     def _cleanup_empty_dirs_after_upload(self, start_dir: Path) -> None:
         curr = start_dir
@@ -978,15 +955,9 @@ class CaptureService:
                     extra={"category": "FILES", "correlation_id": session.session_id},
                 )
             if enqueued > 0:
-                LOGGER.info(
-                    "S3 upload queue updated session_id=%s enqueued_files=%s",
-                    session.session_id,
-                    enqueued,
-                    extra={"category": "FILES", "correlation_id": session.session_id},
-                )
-            # Keep session media indexes coherent with current S3 state for post-processing.
-            self._refresh_session_host_files(session)
-            self._cleanup_uploaded_raw_dirs(session)
+                # Keep session media indexes coherent with current S3 state for post-processing.
+                self._refresh_session_host_files(session)
+                self._cleanup_uploaded_raw_dirs(session)
         except Exception as exc:
             # Keep S3 mode active on upload failures and retry in the next maintenance/flush cycle.
             # Falling back to local immediately on a single-file transient error can leave the
@@ -1159,16 +1130,14 @@ class CaptureService:
                 except Exception as exc:
                     self._abort_active_session(session, reason=str(exc), host_id="storage")
                     break
-                time.sleep(S3_MAINTENANCE_INTERVAL_SECONDS)
-            LOGGER.info(
-                "Stopped S3 maintenance loop session_id=%s",
-                session.session_id,
-                extra={"category": "CAPTURE", "correlation_id": session.session_id},
-            )
+                session.stop_event.wait(S3_MAINTENANCE_INTERVAL_SECONDS)
 
-        t = threading.Thread(target=_loop, name=f"s3-maint-{session.session_id}", daemon=True)
-        t.start()
-        self._maintenance_threads[session.session_id] = t
+        # Submit S3 maintenance with HIGH priority (rolling uploads during capture)
+        self._executor.submit(
+            _loop,
+            priority=PriorityLevel.HIGH,
+            name=f"s3-maint-{session.session_id}",
+        )
 
     def storage_target_hint(self, session: CaptureSession) -> str:
         if session.storage_mode == "s3":
@@ -1253,7 +1222,6 @@ class CaptureService:
         environment: str | None = None,
         region: str | None = None,
     ) -> Dict[str, object]:
-        LOGGER.debug("Refreshing reachable targets force_refresh=%s", force_refresh, extra={"category": "CAPTURE"})
         now = time.time()
         with self._reachability_lock:
             if environment is None:
@@ -1263,7 +1231,6 @@ class CaptureService:
                 cache_valid = (now - env_refresh_at) < REACHABILITY_TTL_SECONDS and environment in self._reachable_hosts
             if cache_valid and not force_refresh:
                 cache_age = now - (self._reachability_at if environment is None else self._reachability_at_by_env.get(environment, now))
-                LOGGER.debug("Using reachability cache age_seconds=%.2f", cache_age, extra={"category": "CAPTURE"})
                 reachable_cached = self._reachable_hosts if environment is None else self._reachable_hosts.get(environment, {})
                 unreachable_cached = self._unreachable_hosts if environment is None else self._unreachable_hosts.get(environment, {})
                 if region:
@@ -1572,22 +1539,8 @@ class CaptureService:
                 extra={"category": "CAPTURE", "correlation_id": session.session_id},
             )
         elif session.storage_mode == "s3":
-            LOGGER.info(
-                "S3 storage enabled session_id=%s bucket=%s prefix=%s",
-                session.session_id,
-                self._s3.bucket,
-                self._s3.prefix or "-",
-                extra={"category": "CAPTURE", "correlation_id": session.session_id},
-            )
             self._set_s3_pool_mode(capture_running=True)
             self._set_s3_upload_mode(capture_running=True)
-        else:
-            LOGGER.info(
-                "Local storage selected session_id=%s raw_dir=%s",
-                session.session_id,
-                session.raw_dir,
-                extra={"category": "CAPTURE", "correlation_id": session.session_id},
-            )
 
         for capture_sub_region, host in targets:
             session.host_packet_counts[host.id] = 0
@@ -1614,14 +1567,15 @@ class CaptureService:
 
             workers: List[HostCaptureWorker] = []
             for iface in host.interfaces:
-                t = threading.Thread(
-                    target=self._capture_loop,
+                # Submit capture loop with CRITICAL priority (highest)
+                self._executor.submit(
+                    self._capture_loop,
+                    session, host, iface, writer,
+                    priority=PriorityLevel.CRITICAL,
                     name=f"rpcap-{host.id}-{iface}",
-                    args=(session, host, iface, writer),
-                    daemon=True,
                 )
-                t.start()
-                workers.append(HostCaptureWorker(host=host, interface=iface, thread=t))
+                # Keep HostCaptureWorker for compatibility (thread set to None)
+                workers.append(HostCaptureWorker(host=host, interface=iface, thread=None))
 
             session.host_workers[host.id] = workers
 
@@ -1772,13 +1726,10 @@ class CaptureService:
         session = self._active_session
 
         session.stop_event.set()
-        maint = self._maintenance_threads.get(session.session_id)
-        if maint and maint.is_alive():
-            maint.join(timeout=3)
+        # Remove maintenance thread tracking (managed by executor)
         self._maintenance_threads.pop(session.session_id, None)
-        for workers in session.host_workers.values():
-            for worker in workers:
-                worker.thread.join(timeout=5)
+        # Workers will stop naturally when they detect stop_event
+        # No need to join - executor manages lifecycle
 
         # Refresh per-host file lists to include all rotated segments (0001, 0002, ...).
         self._refresh_session_host_files(session)
@@ -1822,13 +1773,6 @@ class CaptureService:
                 return text.split("raw\\", 1)[-1].strip()
             return ""
 
-        LOGGER.debug(
-            "Refreshing session host files host_packet_counts_keys=%s raw_dir=%s",
-            list(session.host_packet_counts.keys()),
-            session.raw_dir,
-            extra={"category": "CAPTURE"},
-        )
-
         # If host_packet_counts is empty but we have files, discover host_ids from filenames
         host_ids_to_check = list(session.host_packet_counts.keys())
         if not host_ids_to_check and session.raw_dir.exists():
@@ -1858,12 +1802,6 @@ class CaptureService:
             if not files:
                 files = sorted(session.raw_dir.glob(f"{host_id}-*.pcapng"))
             
-            LOGGER.debug(
-                "Found files for host host_id=%s count=%d",
-                host_id,
-                len(files),
-                extra={"category": "CAPTURE"},
-            )
             # Keep placeholders for raw files already uploaded to S3 (may no longer exist locally).
             uploaded_names: List[str] = []
             for ref in uploaded_refs:
@@ -1897,12 +1835,6 @@ class CaptureService:
             refreshed[host_id] = files
         if refreshed:
             session.host_files = refreshed
-            LOGGER.info(
-                "Refreshed session host files total_hosts=%d total_files=%d",
-                len(refreshed),
-                sum(len(f) for f in refreshed.values()),
-                extra={"category": "CAPTURE"},
-            )
         else:
             LOGGER.warning(
                 "No host files found after refresh host_packet_counts=%s",
@@ -2063,25 +1995,8 @@ class CaptureService:
             while not session.stop_event.is_set():
                 client = RpcapClient(host.address, port=host.port or self._config.rpcap.default_port)
                 try:
-                    if reconnect_attempts > 0:
-                        LOGGER.info(
-                            "Reconnecting to RPCAP server session_id=%s host=%s iface=%s attempt=%s",
-                            session.session_id,
-                            host.id,
-                            iface,
-                            reconnect_attempts,
-                            extra={"category": "CAPTURE", "correlation_id": session.session_id},
-                        )
                     self._connect_and_start_capture(session, host, iface, client)
                     if reconnect_attempts > 0:
-                        LOGGER.info(
-                            "Reconnected to RPCAP server session_id=%s host=%s iface=%s attempts=%s",
-                            session.session_id,
-                            host.id,
-                            iface,
-                            reconnect_attempts,
-                            extra={"category": "CAPTURE", "correlation_id": session.session_id},
-                        )
                         reconnect_attempts = 0
                     self._capture_packets_loop(session, host_id, writer, client)
                     # capture_packets_loop exits only when stop_event is set.
@@ -2149,13 +2064,13 @@ class CaptureService:
     def _start_timeout_watchdog(self, session: CaptureSession) -> None:
         if not session.timeout_at:
             return
-        t = threading.Thread(
-            target=self._timeout_watchdog,
-            args=(session,),
+        # Submit timeout watchdog with CRITICAL priority
+        self._executor.submit(
+            self._timeout_watchdog,
+            session,
+            priority=PriorityLevel.CRITICAL,
             name=f"capture-timeout-{session.session_id}",
-            daemon=True,
         )
-        t.start()
 
     def _timeout_watchdog(self, session: CaptureSession) -> None:
         if not session.timeout_at:
@@ -2166,7 +2081,7 @@ class CaptureService:
             remaining = (session.timeout_at - dt.datetime.utcnow()).total_seconds()
             if remaining <= 0:
                 break
-            time.sleep(min(1.0, max(0.1, remaining)))
+            session.stop_event.wait(min(1.0, max(0.1, remaining)))
 
         if session.stop_event.is_set():
             return

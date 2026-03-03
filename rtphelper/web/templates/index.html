@@ -244,7 +244,30 @@
         </div>
       </div>
     </div>
-
+    <!-- Module imports and initialization -->
+    <script type="module">
+      import { appState } from '/static/state.js';
+      import * as utils from '/static/utils.js';
+      import { api, Poller } from '/static/api-client.js';
+      import { CaptureControls } from '/static/capture-controls.js';
+      import { LogViewer } from '/static/log-viewer.js';
+      
+      // Initialize modules
+      const logViewer = new LogViewer(api, utils);
+      const captureControls = new CaptureControls(api, appState, utils);
+      
+      // Expose to global scope for app.js compatibility
+      window.appState = appState;
+      window.utils = utils;
+      window.api = api;
+      window.Poller = Poller;
+      window.logViewer = logViewer;
+      window.captureControls = captureControls;
+      
+      // Start log streaming
+      logViewer.startLogStreaming();
+    </script>
+    
     <script src="/static/app.js"></script>
   </body>
 </html>

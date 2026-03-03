@@ -15,13 +15,6 @@ LOGGER = logging.getLogger(__name__)
 def extract_stream_to_pcap(stream: StreamMatch, output_pcap: Path) -> tuple[Path, int]:
     """Extract packets matching a StreamMatch across all its source pcaps."""
     output_pcap.parent.mkdir(parents=True, exist_ok=True)
-    LOGGER.debug(
-        "Extract stream start stream_id=%s output=%s sources=%s",
-        stream.stream_id,
-        output_pcap,
-        [str(p) for p in stream.source_pcaps],
-        extra={"category": "FILES"},
-    )
 
     writer = PcapWriter(str(output_pcap), append=False, sync=True)
     count = 0
@@ -54,12 +47,5 @@ def extract_stream_to_pcap(stream: StreamMatch, output_pcap: Path) -> tuple[Path
 
     if count == 0 and output_pcap.exists():
         output_pcap.unlink()
-    LOGGER.debug(
-        "Extract stream done stream_id=%s packets=%s output_exists=%s",
-        stream.stream_id,
-        count,
-        output_pcap.exists(),
-        extra={"category": "FILES"},
-    )
 
     return output_pcap, count
