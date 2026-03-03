@@ -28,6 +28,9 @@ wheelhouse/
 # Documentation and planning (internal)
 docs/
 REFACTORING_IMPLEMENTATION_SUMMARY.md
+TESTE_EXECUTADO.md
+ROOT_CAUSE_ANALYSIS.md
+REFACTORING_IMPLEMENTATION_SUMMARY.md
 
 # Test/backup scripts
 scripts/*copy*.py
