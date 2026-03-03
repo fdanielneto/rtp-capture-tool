@@ -6,6 +6,7 @@ import struct
 from dataclasses import dataclass
 from typing import Optional
 
+from rtphelper.dns_resolver import resolve_host
 from rtphelper.rpcap.bpf_compile import compile_bpf
 from rtphelper.rpcap.protocol import (
     RPCAP_MSG_AUTH_REPLY,
@@ -46,7 +47,8 @@ class RpcapOpenInfo:
 
 class RpcapClient:
     def __init__(self, host: str, port: int = 2002, timeout: float = 10.0) -> None:
-        self._host = host
+        self._host_original = host
+        self._host = resolve_host(host)
         self._port = port
         self._timeout = timeout
         self._sock: Optional[socket.socket] = None
@@ -56,7 +58,16 @@ class RpcapClient:
     def connect(self) -> None:
         if self._sock is not None:
             return
-        LOGGER.debug("Connecting rpcap host=%s port=%s", self._host, self._port, extra={"category": "CAPTURE"})
+        if self._host != self._host_original:
+            LOGGER.debug(
+                "Connecting rpcap host=%s (resolved from %s) port=%s",
+                self._host,
+                self._host_original,
+                self._port,
+                extra={"category": "CAPTURE"},
+            )
+        else:
+            LOGGER.debug("Connecting rpcap host=%s port=%s", self._host, self._port, extra={"category": "CAPTURE"})
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
         sock.settimeout(self._timeout)
         self._sock = sock

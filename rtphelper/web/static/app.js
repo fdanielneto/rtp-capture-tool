@@ -1020,6 +1020,10 @@ function handleStorageState(storageMode, notice, storageTarget = "") {
 function applyStorageFlushState(flush) {
   if (!flush || typeof flush !== "object") {
     setS3UploadGate(false, 0);
+    // Ensure rawFiles is visible when no flush state
+    if (rawFiles && hasLoadedMediaForCorrelation) {
+      rawFiles.hidden = false;
+    }
     updateCorrelationUiState();
     return;
   }
@@ -1037,8 +1041,9 @@ function applyStorageFlushState(flush) {
   if (signature === lastStorageFlushState) return;
   lastStorageFlushState = signature;
   if (gateActive) {
+    // Hide raw files during S3 flush, but don't clear content
     if (rawFiles) {
-      rawFiles.innerHTML = "";
+      rawFiles.hidden = true;
     }
     hasLoadedMediaForCorrelation = false;
     const suffix = pending > 0 ? ` pending files=${pending}` : "";
@@ -1058,6 +1063,10 @@ function applyStorageFlushState(flush) {
     setStatus("Capture stopped.");
     addLog("info", "S3 copy completed successfully.");
     addLog("info", "S3 final upload flush completed.");
+    // Show raw files again after S3 flush completes
+    if (rawFiles) {
+      rawFiles.hidden = false;
+    }
     void refreshRawFilesFromLatestSession();
     updateCorrelationUiState();
     return;
@@ -1065,6 +1074,10 @@ function applyStorageFlushState(flush) {
   if (state === "fallback_local") {
     setStatus("Capture stopped. S3 finalization failed and switched to local storage.", true);
     addLog("warn", "S3 final upload flush failed and switched to local storage.");
+    // Show raw files if fallback to local
+    if (rawFiles) {
+      rawFiles.hidden = false;
+    }
     updateCorrelationUiState();
     return;
   }
@@ -1081,6 +1094,10 @@ function applyStorageFlushState(flush) {
     addLog("error", msg);
     updateCorrelationUiState();
     return;
+  }
+  // For idle or unrecognized states, ensure rawFiles is visible if there's content
+  if (rawFiles && hasLoadedMediaForCorrelation) {
+    rawFiles.hidden = false;
   }
   updateCorrelationUiState();
 }
@@ -2379,10 +2396,39 @@ function renderRawFiles(rawFileMap, rawDir, storageMode = "", storageTarget = ""
   );
   hasLoadedMediaForCorrelation = totalLinks > 0;
   const where = String(storageTarget || rawDir || "");
-  const label = "Files are stored in:";
+  const label = "Raw capture files are stored in:";
   let html = `<p>${label} <code>${where}</code></p>`;
-  // Individual RTP files list hidden from UI
+  
+  // Debug logging
+  console.log("renderRawFiles called with:", { rawFileMap: mapObj, totalLinks, rawDir, storageMode, storageTarget });
+  
+  // Show detailed list of captured RTP files per host in card layout
+  if (totalLinks > 0) {
+    html += '<div class="raw-files-grid">';
+    const hostIds = Object.keys(mapObj).sort();
+    for (const hostId of hostIds) {
+      const links = mapObj[hostId];
+      if (!Array.isArray(links) || links.length === 0) continue;
+      html += '<div class="raw-host-card">';
+      html += `<h4>${escapeHtml(hostId)}</h4>`;
+      html += '<ul>';
+      for (const link of links) {
+        const fileName = String(link || "").split("/").pop();
+        html += `<li><a href="${link}" target="_blank">${escapeHtml(fileName)}</a></li>`;
+      }
+      html += '</ul>';
+      html += '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<p style="color: orange; font-weight: bold;">No RTP files found.</p>';
+  }
+  
   rawFiles.innerHTML = html;
+  rawFiles.hidden = false;
+  rawFiles.style.display = '';
+  rawFiles.style.visibility = 'visible';
+  console.log("After renderRawFiles, rawFiles.hidden:", rawFiles.hidden);
   updateCorrelationUiState();
 }
 
@@ -2470,8 +2516,9 @@ async function runStatusPollingTick() {
         postSection.hidden = false;
         setUiMode(UI_MODE.POST_CAPTURE);
         setPostCaptureEntryMode("capture");
-        renderRawFiles(data.raw_files, data.raw_dir, data.storage_mode, data.storage_target);
+        handleStorageState(data.storage_mode, data.storage_notice, data.storage_target);
         applyStorageFlushState(data.storage_flush);
+        renderRawFiles(data.raw_files, data.raw_dir, data.storage_mode, data.storage_target);
         if (String(data.stop_reason || "").toLowerCase() === "timeout") {
           const timeoutValue = Number(data.timeout_minutes);
           const timeoutLabel = Number.isInteger(timeoutValue) && timeoutValue > 0
@@ -2578,6 +2625,8 @@ function renderFinalFiles(files) {
   html += '</div>';
   finalResults.innerHTML = html;
   finalResults.hidden = false;
+  // Hide raw RTP files list when showing processed files
+  rawFiles.hidden = true;
 }
 
 function renderCorrelationNotice(message, level = "warn") {
@@ -2585,6 +2634,8 @@ function renderCorrelationNotice(message, level = "warn") {
   const cls = level === "error" ? "correlation-notice error" : "correlation-notice warn";
   finalResults.innerHTML = `<div class="${cls}">${safe}</div>`;
   finalResults.hidden = false;
+  // Hide raw RTP files list when showing correlation notice
+  rawFiles.hidden = true;
 }
 
 showLogsToggle.addEventListener("click", () => {
@@ -3005,6 +3056,8 @@ stopBtn.addEventListener("click", async () => {
     setStatus("Stopping capture. Please wait...");
     addLog("info", "Stopping capture...");
     const data = await api("/api/capture/stop", { method: "POST" });
+    console.log("Stop capture response:", data);
+    console.log("raw_files:", data.raw_files);
     stopCaptureConnectivityMonitor();
     stopCaptureReconnectWindow();
     resetHostConnectivityState();
@@ -3023,11 +3076,38 @@ stopBtn.addEventListener("click", async () => {
     hostPanel.hidden = true;
     livePanel.hidden = true;
     postSection.hidden = false;
+    console.log("postSection.hidden set to false");
+    console.log("postSection visibility check:", {
+      hidden: postSection.hidden,
+      display: window.getComputedStyle(postSection).display,
+      visibility: window.getComputedStyle(postSection).visibility
+    });
     setUiMode(UI_MODE.POST_CAPTURE);
     setPostCaptureEntryMode("capture");
-    renderRawFiles(data.raw_files, data.raw_dir, data.storage_mode, data.storage_target);
     handleStorageState(data.storage_mode, data.storage_notice, data.storage_target);
     applyStorageFlushState(data.storage_flush);
+    console.log("About to call renderRawFiles");
+    renderRawFiles(data.raw_files, data.raw_dir, data.storage_mode, data.storage_target);
+    console.log("After renderRawFiles, rawFiles.hidden:", rawFiles.hidden);
+    
+    // Emergency visibility check
+    setTimeout(() => {
+      console.log("EMERGENCY CHECK (500ms later):");
+      console.log("  postSection.hidden:", postSection.hidden);
+      console.log("  rawFiles.hidden:", rawFiles.hidden);
+      console.log("  rawFiles.innerHTML length:", rawFiles.innerHTML.length);
+      console.log("  rawFiles computed display:", window.getComputedStyle(rawFiles).display);
+      console.log("  rawFiles computed visibility:", window.getComputedStyle(rawFiles).visibility);
+      if (rawFiles.hidden || rawFiles.innerHTML.length === 0) {
+        console.error("❌ RAW FILES STILL NOT VISIBLE!");
+        alert("DEBUG: rawFiles is hidden or empty after stop capture. Check console for details.");
+      } else if (window.getComputedStyle(rawFiles).display === 'none' || window.getComputedStyle(rawFiles).visibility === 'hidden') {
+        console.error("❌ RAW FILES HIDDEN BY CSS!");
+        alert("DEBUG: rawFiles is hidden by CSS. Check console for details.");
+      } else {
+        console.log("✅ RAW FILES SHOULD BE VISIBLE");
+      }
+    }, 500);
     if (isStorageFlushActive(data.storage_flush)) {
       startStatusPolling();
     }

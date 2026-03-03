@@ -856,7 +856,7 @@ button:disabled {
 }
 
 .raw-files-grid {
-  column-count: 2;
+  column-count: 3;
   column-gap: 12px;
 }
 
@@ -877,12 +877,6 @@ button:disabled {
 
 .raw-host-card ul {
   margin: 0;
-}
-
-@media (min-width: 1300px) {
-  .raw-files-grid {
-    column-count: 3;
-  }
 }
 
 .help {

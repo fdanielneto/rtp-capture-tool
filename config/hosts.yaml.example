@@ -5,6 +5,11 @@ rpcap:
 settings:
   default_capture_root: /absolute/path/for/captures
 
+# Host address configuration:
+# - Static IP addresses: 10.0.10.11
+# - DNS hostnames/FQDN: rtp-node-1.example.com
+# DNS resolution is cached for 60s (configurable via RTPHELPER_DNS_CACHE_TTL)
+
 environments:
   PRD:
     regions:
@@ -17,8 +22,8 @@ environments:
                 description: PRD EU West 1 media node 1
                 interfaces: ["ens5"]
               - id: prd-eu-west-1-rtp-2
-                address: 10.0.10.12
-                description: PRD EU West 1 media node 2
+                address: rtp-node-2.example.com
+                description: PRD EU West 1 media node 2 (dynamic DNS)
                 interfaces: ["ens5"]
       US:
         sub-region:

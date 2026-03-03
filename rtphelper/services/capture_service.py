@@ -1404,6 +1404,9 @@ class CaptureService:
         if bpf_filter == "":
             bpf_filter = "udp"
 
+        # Determine if we're in "all hosts" mode (no explicit host selection)
+        all_hosts_mode = not host_ids or len(host_ids) == 0
+        
         targets = all_targets
         if host_ids:
             selected_ids = set(host_ids)
@@ -1412,25 +1415,63 @@ class CaptureService:
                 raise ValueError("No valid selected hosts found in selected sub-regions")
 
         reach = self.get_reachable_targets(force_refresh=True, environment=environment, region=top_region)
-        for sub_region_name, h in targets:
-            reachable_in_sub_region: Dict[str, HostConfig] = {
-                r.id: r
-                for r in (
-                    (
-                        reach["reachable"].get(top_region, {}).get(sub_region_name, [])
-                        if isinstance(reach["reachable"], dict)
-                        else []
+        
+        if all_hosts_mode:
+            # In "all hosts" mode, automatically filter to only reachable hosts
+            reachable_targets = []
+            unreachable_hosts = []
+            for sub_region_name, h in targets:
+                reachable_in_sub_region: Dict[str, HostConfig] = {
+                    r.id: r
+                    for r in (
+                        (
+                            reach["reachable"].get(top_region, {}).get(sub_region_name, [])
+                            if isinstance(reach["reachable"], dict)
+                            else []
+                        )
                     )
+                }
+                if h.id in reachable_in_sub_region:
+                    reachable_targets.append((sub_region_name, h))
+                else:
+                    reason = ""
+                    if isinstance(reach["unreachable"], dict):
+                        reason = (reach["unreachable"].get(top_region, {}).get(sub_region_name, {}) or {}).get(h.id, "")
+                    unreachable_hosts.append(f"{h.id} ({h.address}): {reason}" if reason else f"{h.id} ({h.address})")
+            
+            if unreachable_hosts:
+                LOGGER.warning(
+                    "Excluding %d unreachable host(s) from capture: %s",
+                    len(unreachable_hosts),
+                    ", ".join(unreachable_hosts),
+                    extra={"category": "CAPTURE", "correlation_id": request_cid},
                 )
-            }
-            if h.id not in reachable_in_sub_region:
-                reason = ""
-                if isinstance(reach["unreachable"], dict):
-                    reason = (reach["unreachable"].get(top_region, {}).get(sub_region_name, {}) or {}).get(h.id, "")
-                msg = f"Host is not reachable via rpcapd: {environment}/{top_region}/{sub_region_name}/{h.id} ({h.address})"
-                if reason:
-                    msg += f" - {reason}"
-                raise ValueError(msg)
+            
+            if not reachable_targets:
+                raise ValueError(f"No reachable hosts found in selected region/sub-region(s)")
+            
+            targets = reachable_targets
+        else:
+            # With specific host selection, require ALL selected hosts to be reachable
+            for sub_region_name, h in targets:
+                reachable_in_sub_region: Dict[str, HostConfig] = {
+                    r.id: r
+                    for r in (
+                        (
+                            reach["reachable"].get(top_region, {}).get(sub_region_name, [])
+                            if isinstance(reach["reachable"], dict)
+                            else []
+                        )
+                    )
+                }
+                if h.id not in reachable_in_sub_region:
+                    reason = ""
+                    if isinstance(reach["unreachable"], dict):
+                        reason = (reach["unreachable"].get(top_region, {}).get(sub_region_name, {}) or {}).get(h.id, "")
+                    msg = f"Host is not reachable via rpcapd: {environment}/{top_region}/{sub_region_name}/{h.id} ({h.address})"
+                    if reason:
+                        msg += f" - {reason}"
+                    raise ValueError(msg)
 
         resumed_from: Optional[CaptureSession] = None
         safe_output_dir: Optional[str] = None
@@ -1781,17 +1822,56 @@ class CaptureService:
                 return text.split("raw\\", 1)[-1].strip()
             return ""
 
-        for host_id in session.host_packet_counts.keys():
+        LOGGER.debug(
+            "Refreshing session host files host_packet_counts_keys=%s raw_dir=%s",
+            list(session.host_packet_counts.keys()),
+            session.raw_dir,
+            extra={"category": "CAPTURE"},
+        )
+
+        # If host_packet_counts is empty but we have files, discover host_ids from filenames
+        host_ids_to_check = list(session.host_packet_counts.keys())
+        if not host_ids_to_check and session.raw_dir.exists():
+            all_files = list(session.raw_dir.glob("*.pcap")) + list(session.raw_dir.glob("*.pcapng"))
+            discovered_hosts = set()
+            for f in all_files:
+                host_key = self._host_key_from_capture_filename(f.name)
+                if host_key and host_key != "unknown":
+                    discovered_hosts.add(host_key)
+            host_ids_to_check = sorted(discovered_hosts)
+            LOGGER.info(
+                "Discovered host_ids from filenames count=%d hosts=%s",
+                len(host_ids_to_check),
+                host_ids_to_check,
+                extra={"category": "CAPTURE"},
+            )
+
+        for host_id in host_ids_to_check:
+            # Try pattern with leading wildcard first (normal case: host_id without sub-region)
             files = sorted(session.raw_dir.glob(f"*-{host_id}-*.pcap"))
             if not files:
                 files = sorted(session.raw_dir.glob(f"*-{host_id}-*.pcapng"))
+            
+            # If not found, try without leading wildcard (fallback case: host_id includes sub-region prefix)
+            if not files:
+                files = sorted(session.raw_dir.glob(f"{host_id}-*.pcap"))
+            if not files:
+                files = sorted(session.raw_dir.glob(f"{host_id}-*.pcapng"))
+            
+            LOGGER.debug(
+                "Found files for host host_id=%s count=%d",
+                host_id,
+                len(files),
+                extra={"category": "CAPTURE"},
+            )
             # Keep placeholders for raw files already uploaded to S3 (may no longer exist locally).
             uploaded_names: List[str] = []
             for ref in uploaded_refs:
                 name = _raw_name(ref)
                 if not name:
                     continue
-                if f"-{host_id}-" not in name:
+                # Check if host_id appears in name (with or without leading hyphen)
+                if f"-{host_id}-" not in name and not name.startswith(f"{host_id}-"):
                     continue
                 if not (name.endswith(".pcap") or name.endswith(".pcapng")):
                     continue
@@ -1801,7 +1881,8 @@ class CaptureService:
                 name = _raw_name(s3_key)
                 if not name:
                     continue
-                if f"-{host_id}-" not in name:
+                # Check if host_id appears in name (with or without leading hyphen)
+                if f"-{host_id}-" not in name and not name.startswith(f"{host_id}-"):
                     continue
                 if not (name.endswith(".pcap") or name.endswith(".pcapng")):
                     continue
@@ -1816,6 +1897,18 @@ class CaptureService:
             refreshed[host_id] = files
         if refreshed:
             session.host_files = refreshed
+            LOGGER.info(
+                "Refreshed session host files total_hosts=%d total_files=%d",
+                len(refreshed),
+                sum(len(f) for f in refreshed.values()),
+                extra={"category": "CAPTURE"},
+            )
+        else:
+            LOGGER.warning(
+                "No host files found after refresh host_packet_counts=%s",
+                session.host_packet_counts,
+                extra={"category": "CAPTURE"},
+            )
         if s3_source_by_host:
             session.s3_source_objects = s3_source_by_host
             # Derive session prefix from first known S3 raw key.
