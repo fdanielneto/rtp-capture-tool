@@ -572,6 +572,36 @@ button:disabled {
   display: none;
 }
 
+.prd-filter-warning {
+  margin: 16px 0;
+  padding: 12px 16px;
+  background: rgba(251, 191, 36, 0.15);
+  border-left: 3px solid #f59e0b;
+  border-radius: 6px;
+  color: #fbbf24;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.prd-filter-warning .warning-icon {
+  margin-right: 8px;
+  font-size: 16px;
+}
+
+.prd-filter-warning a {
+  color: #60a5fa;
+  text-decoration: underline;
+  font-weight: 500;
+}
+
+.prd-filter-warning a:hover {
+  color: #93c5fd;
+}
+
+.prd-filter-warning[hidden] {
+  display: none;
+}
+
 .checkbox-inline input {
   width: auto;
   margin: 0;

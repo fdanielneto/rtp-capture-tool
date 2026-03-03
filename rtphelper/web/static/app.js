@@ -2775,6 +2775,13 @@ s3SessionSelect?.addEventListener("change", () => {
 
 environmentInput.addEventListener("change", async () => {
   const env = String(environmentInput.value || "").toUpperCase();
+  
+  // Update PRD filter warning visibility
+  const prdFilterWarning = document.getElementById("prdFilterWarning");
+  if (prdFilterWarning) {
+    prdFilterWarning.hidden = env !== "PRD";
+  }
+  
   if (!env) {
     regionInput.innerHTML = '<option value="">Select region...</option>';
     configuredSubRegionsByRegion = {};
