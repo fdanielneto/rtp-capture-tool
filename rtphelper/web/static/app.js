@@ -513,6 +513,7 @@ function formatStructuredProjectMessage(message) {
       "carrier_invite_packet",
       "carrier_200ok_packet",
       "core_invite_packet",
+      "core_200ok_packet",
       "invite_packet_number",
       "reply_packet_number",
       "packet_number",
@@ -536,6 +537,15 @@ function formatStructuredProjectMessage(message) {
 
   escaped = escaped.replace(/COMBINED FILTER:/gi, '<span class="log-token-filter-yellow">COMBINED FILTER:</span>');
   escaped = escaped.replace(/(^|[^A-Z])(FILTER:|Filter:)/g, (m, prefix, token) => `${prefix}<span class="log-token-filter-yellow">${token}</span>`);
+  
+  // Colorize the tshark filter expression in white (keep "Filter for" in default gray)
+  escaped = escaped.replace(
+    /(Filter for\s+[^\s:]+\.pcap):\s+(.+)$/gi,
+    (m, prefix, tsharkFilter) => {
+      return `${prefix}: <span class="log-token-value">${tsharkFilter}</span>`;
+    }
+  );
+  
   escaped = escaped.replace(
     /\b(packets=)(\d+)(\s+KEEP)\b/gi,
     '$1$2<span class="log-token-green">$3</span>'
@@ -552,7 +562,8 @@ function shouldKeepLineWhite(message) {
   if (/^=+\s*Phase\s+2:\s*Extract individual legs\s*=+\s*$/i.test(msg)) return true;
   if (/^SIP CORRELATION ANALYSIS$/i.test(msg)) return true;
   if (/^=+\s*SIP CORRELATION ANALYSIS\s*=+\s*$/i.test(msg)) return true;
-  if (/^=+\s*RTP Engine IP Detection\s*=+\s*$/i.test(msg)) return true;
+  if (/^=+\s*Media Capture Files Mapping\s*=+\s*$/i.test(msg)) return true;
+  if (/^Leg\s+(carrier_to_rtpengine|rtpengine_to_carrier|rtpengine_to_core|core_to_rtpengine)\s+COMPLETE:/i.test(msg)) return true;
   if (/^=+$/.test(msg)) return true;
   if (/^-+$/.test(msg)) return true;
   return false;
@@ -3027,7 +3038,7 @@ startBtn.addEventListener("click", async () => {
     if (lastCapturePreset) {
       lastCapturePreset.sessionId = data.session_id;
     }
-    lastAutoStopSessionId = data.session_id || "";
+    lastAutoStopSessionId = "";
     activeCaptureHostIds = Array.isArray(data.hosts) ? data.hosts.slice() : [];
     resetHostConnectivityState();
     lastStorageFlushState = "";

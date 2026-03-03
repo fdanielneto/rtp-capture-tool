@@ -116,8 +116,29 @@ def run_correlation_job_via_subprocess(
     if returncode != 0:
         stdout = (stdout_text or "").strip()
         stderr = (stderr_text or "").strip()
-        details = stderr or stdout or f"subprocess exit={proc.returncode}"
-        raise RuntimeError(f"Correlation subprocess failed: {details}")
+        
+        # Try to extract clean error message from ValueError at end of stderr
+        # to avoid showing full Python tracebacks in UI
+        clean_error = None
+        if stderr and "ValueError:" in stderr:
+            # Extract the final ValueError message (after last "ValueError:")
+            lines = stderr.split("\n")
+            for i in range(len(lines) - 1, -1, -1):
+                if lines[i].startswith("ValueError:"):
+                    # Get this line and any continuation lines (indented or part of same message)
+                    error_lines = [lines[i].replace("ValueError: ", "")]
+                    for j in range(i + 1, len(lines)):
+                        # Include lines that are part of the same message (not "Traceback" or "File ")
+                        if lines[j] and not lines[j].startswith(("Traceback", "  File ", "During handling")):
+                            error_lines.append(lines[j])
+                        else:
+                            break
+                    clean_error = "\n".join(error_lines).strip()
+                    break
+        
+        details = clean_error or stderr or stdout or f"subprocess exit={proc.returncode}"
+        # Use clean message directly without adding prefix (already clear for users)
+        raise RuntimeError(details)
     try:
         return json.loads(stdout_text or "{}")
     except Exception as exc:
