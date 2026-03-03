@@ -50,17 +50,9 @@
         <div class="location-choice-group">
           <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationLocal" value="local" checked /> Local</label>
           <label class="location-choice"><input type="radio" name="captureLocation" id="captureLocationS3" value="s3" /> AWS S3</label>
+          <button id="chooseS3SpoolDirBtn" type="button" class="selection-chip" title="Local directory used before S3 flush (optional)" hidden>External tmp dir</button>
         </div>
         <div id="captureLocationDisclaimer" class="help capture-location-warning"></div>
-        <div id="s3SpoolDirPanel" hidden>
-          <label for="chooseS3SpoolDirBtn">Local directory used before S3 flush (optional)</label>
-          <div class="help s3-spool-help">
-            If no directory is selected, the default spool directory is used.
-          </div>
-          <div class="s3-spool-picker-row">
-            <button id="chooseS3SpoolDirBtn" type="button" class="selection-chip">Choose folder</button>
-          </div>
-        </div>
         <div class="buttons">
           <button id="captureLocationContinueBtn" type="button">Continue</button>
           <button id="captureLocationBackBtn" type="button" class="secondary">Back</button>
