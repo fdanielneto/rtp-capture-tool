@@ -1966,7 +1966,7 @@ async def correlate(
                             files_with_traffic[pcap_file] = count
                             add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
                         else:
-                            # File has no relevant traffic - delete if from S3 cache (should not happen here but handle it)
+                            # File has no relevant traffic - delete if from S3 cache
                             is_s3_local_cache = "s3_source_cache" in str(pcap_file.parent)
                             if is_s3_local_cache:
                                 try:
@@ -1998,7 +1998,7 @@ async def correlate(
                         files_with_traffic[pcap_file] = count
                         add_log_line(f"  ✓ {pcap_file.name}: {count} packets - WILL PROCESS")
                     else:
-                        # File has no relevant traffic - delete if from S3 cache (should not happen here but handle it)
+                        # File has no relevant traffic - delete if from S3 cache
                         is_s3_local_cache = "s3_source_cache" in str(pcap_file.parent)
                         if is_s3_local_cache:
                             try:
@@ -3829,29 +3829,34 @@ def _file_link(session, kind: str, path: Path) -> str:
 
 
 def _cleanup_local_raw_after_postprocess(session: CaptureSession, log_lines: List[str], correlation_id: str) -> None:
-    # Never remove user-provided raw directories from local-reference imports.
-    if str(getattr(session, "source_mode", "") or "") == "local_reference":
-        return
-    if not bool(getattr(session, "raw_dir_managed", True)):
-        return
-    raw_dir = session.raw_dir
-    if not raw_dir.exists():
-        return
-    try:
-        removed_files = sum(1 for p in raw_dir.rglob("*") if p.is_file())
-        shutil.rmtree(raw_dir)
-        session.host_files = {}
-        session.host_packet_counts = {}
-        msg = (
-            f"Local raw media directory removed after post-process dir={raw_dir} "
-            f"files_removed={removed_files}"
-        )
-        log_lines.append(f"INFO: {msg}")
-        LOGGER.info(msg, extra={"category": "FILES", "correlation_id": correlation_id})
-    except Exception as exc:
-        msg = f"Could not remove local raw media directory after post-process dir={raw_dir} reason={exc}"
-        log_lines.append(f"WARN: {msg}")
-        LOGGER.warning(msg, extra={"category": "FILES", "correlation_id": correlation_id})
+    # Raw file cleanup disabled - preserve raw files for both Local and S3 capture modes
+    # This allows cache reuse and maintains original capture data for debugging/reprocessing
+    return
+    
+    # Original cleanup logic (disabled):
+    # # Never remove user-provided raw directories from local-reference imports.
+    # if str(getattr(session, "source_mode", "") or "") == "local_reference":
+    #     return
+    # if not bool(getattr(session, "raw_dir_managed", True)):
+    #     return
+    # raw_dir = session.raw_dir
+    # if not raw_dir.exists():
+    #     return
+    # try:
+    #     removed_files = sum(1 for p in raw_dir.rglob("*") if p.is_file())
+    #     shutil.rmtree(raw_dir)
+    #     session.host_files = {}
+    #     session.host_packet_counts = {}
+    #     msg = (
+    #         f"Local raw media directory removed after post-process dir={raw_dir} "
+    #         f"files_removed={removed_files}"
+    #     )
+    #     log_lines.append(f"INFO: {msg}")
+    #     LOGGER.info(msg, extra={"category": "FILES", "correlation_id": correlation_id})
+    # except Exception as exc:
+    #     msg = f"Could not remove local raw media directory after post-process dir={raw_dir} reason={exc}"
+    #     log_lines.append(f"WARN: {msg}")
+    #     LOGGER.warning(msg, extra={"category": "FILES", "correlation_id": correlation_id})
 
 
 def _raw_file_links(session) -> Dict[str, List[str]]:
