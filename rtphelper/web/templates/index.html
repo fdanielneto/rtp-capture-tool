@@ -218,6 +218,55 @@
         <div id="rawFiles"></div>
       </section>
 
+      <!-- Manual Correlation Panel -->
+      <section class="panel" id="manualCorrelationPanel" hidden>
+        <h2>Manual Correlation</h2>
+        <p class="help">Enter the RTP/SRTP parameters manually to perform correlation.</p>
+        
+        <div class="manual-correlation-form">
+          <h3>Carrier Leg</h3>
+          <div class="form-row">
+            <label for="carrierRtpIp">RTP IP from Carrier:</label>
+            <input type="text" id="carrierRtpIp" placeholder="e.g. 192.168.1.100" />
+          </div>
+          <div class="form-row">
+            <label for="carrierRtpPort">RTP Port from Carrier:</label>
+            <input type="number" id="carrierRtpPort" placeholder="e.g. 10000" min="1" max="65535" />
+          </div>
+          <div class="form-row">
+            <label for="carrierCipherName">Cipher Name:</label>
+            <input type="text" id="carrierCipherName" placeholder="e.g. AES_CM_128_HMAC_SHA1_80" />
+          </div>
+          <div class="form-row">
+            <label for="carrierCipherInline">Cipher Inline Value:</label>
+            <input type="text" id="carrierCipherInline" placeholder="e.g. inline:base64encodedkey..." />
+          </div>
+
+          <h3>Core Leg</h3>
+          <div class="form-row">
+            <label for="coreRtpIp">RTP IP from Core:</label>
+            <input type="text" id="coreRtpIp" placeholder="e.g. 192.168.1.200" />
+          </div>
+          <div class="form-row">
+            <label for="coreRtpPort">RTP Port from Core:</label>
+            <input type="number" id="coreRtpPort" placeholder="e.g. 20000" min="1" max="65535" />
+          </div>
+          <div class="form-row">
+            <label for="coreCipherName">Cipher Name:</label>
+            <input type="text" id="coreCipherName" placeholder="e.g. AES_CM_128_HMAC_SHA1_80" />
+          </div>
+          <div class="form-row">
+            <label for="coreCipherInline">Cipher Inline Value:</label>
+            <input type="text" id="coreCipherInline" placeholder="e.g. inline:base64encodedkey..." />
+          </div>
+
+          <div class="buttons" style="margin-top: 20px;">
+            <button id="cancelManualCorrelationFormBtn" type="button">Cancel</button>
+            <button id="runManualCorrelationBtn" type="button">⚡ Run Manual Correlation</button>
+          </div>
+        </div>
+      </section>
+
       <section class="panel" id="logSection">
         <div class="log-header">
           <h2>Logs</h2>
@@ -230,6 +279,31 @@
         <div class="help">Use Debug level for HTTP requests, filters, and step-by-step correlation details.</div>
       </section>
     </main>
+
+    <!-- Manual Correlation Prompt Modal -->
+    <div id="manualCorrelationPromptModal" class="capture-leave-modal-backdrop" hidden>
+      <div class="capture-leave-modal">
+        <h3>Correlation Failed</h3>
+        <p id="manualCorrelationPromptMessage">The automatic correlation failed. Would you like to perform a manual correlation?</p>
+        <div class="capture-leave-actions">
+          <button id="cancelManualCorrelationBtn" type="button">No</button>
+          <button id="proceedManualCorrelationBtn" type="button">Yes, Manual Correlation</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="prdCaptureWarningModal" class="capture-leave-modal-backdrop" hidden>
+      <div class="capture-leave-modal">
+        <h3>⚠️ PRD/Production Capture Without Filters</h3>
+        <p>You are about to start a capture in <strong>PRD/Production environment without filters</strong>.</p>
+        <p style="color: #f87171; font-weight: 600; margin-top: 8px;">This will result in significant packet loss and affect the final capture outcome.</p>
+        <p style="margin-top: 8px;">Are you sure you want to proceed?</p>
+        <div class="capture-leave-actions">
+          <button id="cancelPrdCaptureBtn" type="button">Cancel</button>
+          <button id="proceedPrdCaptureBtn" type="button" style="background: #f87171;">Yes, Proceed Anyway</button>
+        </div>
+      </div>
+    </div>
 
     <div id="captureLeaveModal" class="capture-leave-modal-backdrop" hidden>
       <div class="capture-leave-modal">

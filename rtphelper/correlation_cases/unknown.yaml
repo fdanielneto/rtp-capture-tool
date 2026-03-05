@@ -1,0 +1,17 @@
+name: unknown
+description: Catch-all for unidentified cases
+priority: 0
+enabled: true
+
+detection:
+  direction: both
+  # Matches anything - lowest priority
+
+correlation:
+  strategy: generic
+  annotations:
+    - "Correlator: GenericCorrelator (Unknown)"
+  
+  notes: |
+    Absolute fallback correlator when direction is unclear or unspecified.
+    Uses the original generic correlation logic.

@@ -1,0 +1,191 @@
+name: inbound_rtp_engine_configurable
+description: Example of configurable correlation with custom filter templates
+priority: 48
+enabled: true
+
+detection:
+  direction: inbound
+  # This case uses configurable correlation logic
+  # Can be enabled for testing or specific scenarios
+
+# ===== CORRELATION CONFIGURATION =====
+correlation:
+  strategy: generic  # Can be "generic", "configurable", or custom class
+  force_direction: inbound
+  annotations:
+    - "Correlator: ConfigurableCorrelator (Example)"
+    - "Topology: Carrier → RTP Engine → Core"
+  
+  # Runtime behavior configuration
+  config:
+    # IP extraction rules
+    carrier_ip_source: first_invite.src_ip
+    core_ip_source: last_invite.dst_ip
+    
+    # Response finding strategy
+    response_priority: [183, 200]  # Try 183 Session Progress first, fallback to 200 OK
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    
+    # RTP Engine detection
+    rtp_engine_detection: enabled  # "enabled", "disabled", or "optional"
+    xcc_ip_source: invite_with_changed_sdp.src_ip
+    
+    # Special handling
+    filter_reinvites: true
+    group_multi_call_ids: true
+  
+  notes: |
+    Example configuration showing all available correlation options.
+    
+    IP Source Options:
+    - first_invite.src_ip / first_invite.dst_ip
+    - last_invite.src_ip / last_invite.dst_ip
+    - first_invite.via.received
+    - last_invite.request_uri.host
+    
+    Response Priority:
+    - [183, 200] = Try 183 Session Progress first
+    - [200, 183] = Try 200 OK first
+    - [200] = Only use 200 OK
+    
+    RTP Engine Detection:
+    - enabled: Always detect RTP Engine (SDP c= change analysis)
+    - disabled: Never detect RTP Engine
+    - optional: Detect if present, don't fail if absent
+
+# ===== FILTERS CONFIGURATION =====
+filters:
+  # Use built-in template set
+  template_set: rtp_engine_topology  # or "direct_topology"
+  use_default_templates: true
+  
+  # Custom templates (optional - override default templates)
+  custom_templates:
+    enabled: false  # Set to true to use custom templates below
+    
+    steps:
+      # Step 1: carrier -> host (RTP from carrier)
+      - step: 1
+        leg_name: carrier->host
+        leg_key: leg_carrier_rtpengine
+        description: RTP from carrier to RTP Engine
+        
+        # Phase 1: Count packets (omit ip.src for unknown RTP Engine)
+        phase1_template: |
+          {% if direction == 'inbound' %}
+          ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+          {% else %}
+          ip.dst==${carrier.destination.ip} && udp.srcport==${carrier.source.port}
+          {% endif %}
+        
+        # Phase 2: Extract packets (use detected RTP Engine IP)
+        phase2_template: |
+          {% if direction == 'inbound' %}
+          ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+          {% else %}
+          ip.src==${carrier.destination.ip} && udp.srcport==${carrier.destination.port}
+          {% endif %}
+        
+        required_fields:
+          - carrier.source.ip
+          - carrier.source.port
+      
+      # Step 2: host -> carrier (RTP from RTP Engine to carrier)
+      - step: 2
+        leg_name: host->carrier
+        leg_key: leg_rtpengine_carrier
+        description: RTP from RTP Engine to carrier
+        
+        phase1_template: |
+          {% if direction == 'inbound' %}
+          udp.srcport==${carrier.destination.port} && ip.dst==${carrier.source.ip}
+          {% else %}
+          ip.src==${carrier.destination.ip} && udp.srcport==${carrier.destination.port}
+          {% endif %}
+        
+        phase2_template: |
+          {% if direction == 'inbound' %}
+          ip.src==${rtpengine.detected_ip} && udp.srcport==${carrier.destination.port}
+          {% else %}
+          ip.src==${rtpengine.detected_ip} && udp.srcport==${carrier.source.port}
+          {% endif %}
+        
+        required_fields:
+          - carrier.destination.port
+          - rtpengine.detected_ip
+      
+      # Step 3: host -> core (RTP from RTP Engine to core)
+      - step: 3
+        leg_name: host->core
+        leg_key: leg_rtpengine_core
+        description: RTP from RTP Engine to core
+        
+        phase1_template: |
+          {% if direction == 'inbound' %}
+          udp.srcport==${core.source.port} && ip.dst==${core.destination.ip}
+          {% else %}
+          ip.src==${core.source.ip} && udp.srcport==${core.source.port}
+          {% endif %}
+        
+        phase2_template: |
+          {% if direction == 'inbound' %}
+          ip.src==${rtpengine.detected_ip} && udp.srcport==${core.source.port}
+          {% else %}
+          ip.src==${rtpengine.detected_ip} && udp.srcport==${core.destination.port}
+          {% endif %}
+        
+        required_fields:
+          - core.source.port
+          - rtpengine.detected_ip
+      
+      # Step 4: core -> host (RTP from core)
+      - step: 4
+        leg_name: core->host
+        leg_key: leg_core_rtpengine
+        description: RTP from core to RTP Engine
+        
+        phase1_template: |
+          {% if direction == 'inbound' %}
+          ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}
+          {% else %}
+          ip.dst==${core.source.ip} && udp.srcport==${core.destination.port}
+          {% endif %}
+        
+        phase2_template: |
+          {% if direction == 'inbound' %}
+          ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}
+          {% else %}
+          ip.src==${core.source.ip} && udp.srcport==${core.source.port}
+          {% endif %}
+        
+        required_fields:
+          - core.destination.ip
+          - core.destination.port
+
+# ===== TEMPLATE VARIABLES REFERENCE =====
+# Available variables for filter templates:
+#
+# ${direction}                     - "inbound" or "outbound"
+#
+# Carrier leg:
+# ${carrier.source.ip}             - Carrier source IP (from INVITE SDP)
+# ${carrier.source.port}           - Carrier source port
+# ${carrier.destination.ip}        - Carrier destination IP (from response SDP)
+# ${carrier.destination.port}      - Carrier destination port
+#
+# Core leg:
+# ${core.source.ip}                - Core source IP (from INVITE SDP)
+# ${core.source.port}              - Core source port
+# ${core.destination.ip}           - Core destination IP (from response SDP)
+# ${core.destination.port}         - Core destination port
+#
+# RTP Engine:
+# ${rtpengine.detected_ip}         - Actual IP detected from PCAP
+# ${rtpengine.announced_ip}        - IP announced in SDP (changed_sdp_ip)
+# ${rtpengine.xcc_ip}              - XCC/B2BUA server IP
+#
+# Conditionals (Jinja2-style):
+# {% if direction == 'inbound' %}...{% endif %}
+# {% if direction == 'outbound' %}...{% else %}...{% endif %}

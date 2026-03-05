@@ -1,0 +1,35 @@
+name: test_configurable_case
+description: Test case with full correlation and filters configuration
+priority: 99
+enabled: false  # Disabled so it doesn't interfere with production
+
+detection:
+  direction: inbound
+
+correlation:
+  strategy: generic
+  config:
+    carrier_ip_source: first_invite.src_ip
+    core_ip_source: last_invite.dst_ip
+    response_priority: [183, 200]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    rtp_engine_detection: enabled
+    xcc_ip_source: invite_with_changed_sdp.src_ip
+    filter_reinvites: true
+    group_multi_call_ids: true
+
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: false
+  custom_templates:
+    enabled: true
+    steps:
+      - step: 1
+        leg_name: test_leg
+        leg_key: test_key
+        description: Test filter step
+        phase1_template: "ip.src==${carrier.source.ip}"
+        phase2_template: "ip.src==${carrier.source.ip}"
+        required_fields: [carrier.source.ip]

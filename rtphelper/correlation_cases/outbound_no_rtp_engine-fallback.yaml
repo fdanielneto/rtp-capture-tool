@@ -1,0 +1,33 @@
+name: outbound_no_rtp_engine-fallback
+description: Outbound calls without RTP Engine (direct Core → Carrier)
+priority: 41
+enabled: true
+
+detection:
+  direction: outbound
+  # No RTP Engine: SDP c= IP remains constant across INVITEs
+
+correlation:
+  strategy: generic
+  force_direction: outbound
+  annotations:
+    - "Correlator: GenericCorrelator (Outbound direct)"
+    - "Scenario: Core → Carrier (no RTP Engine)"
+  
+  notes: |
+    Use Case: Outbound calls with direct path (no RTP Engine).
+    
+    Call Flow:
+    - Core sends INVITE directly to Carrier
+    - No intermediate RTP Engine/media proxy
+    - SDP c= line remains unchanged
+    
+    Detection:
+    - SDP c= IP does NOT change across INVITE hops
+    - Single-hop scenario (may have B2BUA for signaling only)
+    
+    Media Endpoints:
+    - Core leg: from first INVITE and its 183/200 OK
+    - Carrier leg: same IPs as core leg (no intermediate media hop)
+    
+    Priority: 41 (after RTP Engine cases)

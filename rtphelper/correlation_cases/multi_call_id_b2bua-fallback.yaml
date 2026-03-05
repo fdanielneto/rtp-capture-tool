@@ -1,0 +1,51 @@
+name: multi_call_id_b2bua-fallback
+description: Calls with multiple Call-IDs (B2BUA with X-Talkdesk-Other-Leg-Call-Id)
+priority: 75
+enabled: true
+
+detection:
+  direction: both
+  # Detects B2BUA scenarios with multiple Call-IDs
+  # Uses X-Talkdesk-Other-Leg-Call-Id header to group related calls
+
+correlation:
+  strategy: generic
+  annotations:
+    - "Correlator: GenericCorrelator (Multi Call-ID B2BUA)"
+    - "Feature: Call-ID grouping via X-Talkdesk-Other-Leg-Call-Id"
+  
+  notes: |
+    Use Case: B2BUA scenarios with multiple Call-IDs.
+    
+    B2BUA Behavior:
+    - Back-to-Back User Agent terminates one call leg and originates another
+    - Each leg has separate Call-ID
+    - X-Talkdesk-Other-Leg-Call-Id header links the legs
+    
+    Call Flow Example:
+    1. Carrier → B2BUA (Call-ID: abc@carrier)
+       - B2BUA adds: X-Talkdesk-Other-Leg-Call-Id: xyz@b2bua
+    2. B2BUA → Core (Call-ID: xyz@b2bua)
+       - B2BUA adds: X-Talkdesk-Other-Leg-Call-Id: abc@carrier
+    
+    Correlation Process:
+    - group_related_calls() builds connected components of Call-IDs
+    - merge_calls_by_group() combines messages from all related Call-IDs
+    - Correlation analyzes merged call as single logical call
+    
+    Detection:
+    - Any SIP message with other_leg_call_id field populated
+    - Builds bidirectional mapping of Call-ID relationships
+    - Uses DFS (Depth-First Search) to find connected components
+    
+    Media Endpoints:
+    - First INVITE (lowest timestamp) determines carrier/core based on direction
+    - Last INVITE (highest timestamp, no to_tag) identifies final destination
+    - Handles from_tag changes across Call-ID boundaries
+    
+    Priority: 75 (highest priority to properly group calls before correlation)
+    
+    Implementation:
+    - Function: group_related_calls()
+    - Function: merge_calls_by_group()
+    - Location: sip_correlation.py lines ~418-480

@@ -26,9 +26,19 @@ const refreshS3SessionsBtn = document.getElementById("refreshS3SessionsBtn");
 const importS3SessionBtn = document.getElementById("importS3SessionBtn");
 const s3ImportStatus = document.getElementById("s3ImportStatus");
 const showLogsToggle = document.getElementById("showLogsToggle");
+const prdCaptureWarningModal = document.getElementById("prdCaptureWarningModal");
+const cancelPrdCaptureBtn = document.getElementById("cancelPrdCaptureBtn");
+const proceedPrdCaptureBtn = document.getElementById("proceedPrdCaptureBtn");
 const captureLeaveModal = document.getElementById("captureLeaveModal");
 const stayOnCaptureBtn = document.getElementById("stayOnCaptureBtn");
 const leaveAndCancelBtn = document.getElementById("leaveAndCancelBtn");
+const manualCorrelationPromptModal = document.getElementById("manualCorrelationPromptModal");
+const manualCorrelationPromptMessage = document.getElementById("manualCorrelationPromptMessage");
+const cancelManualCorrelationBtn = document.getElementById("cancelManualCorrelationBtn");
+const proceedManualCorrelationBtn = document.getElementById("proceedManualCorrelationBtn");
+const manualCorrelationPanel = document.getElementById("manualCorrelationPanel");
+const cancelManualCorrelationFormBtn = document.getElementById("cancelManualCorrelationFormBtn");
+const runManualCorrelationBtn = document.getElementById("runManualCorrelationBtn");
 
 const statusBox = document.getElementById("status");
 const criticalStatusBox = document.getElementById("criticalStatus");
@@ -153,6 +163,7 @@ const UI_MODE = Object.freeze({
   RECOVERING: "recovering",
   POST_CAPTURE: "post_capture",
   CORRELATING: "correlating",
+  MANUAL_CORRELATION: "manual_correlation",
 });
 
 let uiMode = UI_MODE.IDLE;
@@ -1743,6 +1754,26 @@ async function importSelectedS3Session() {
   }
 }
 
+function clearManualCorrelationForm() {
+  const carrierRtpIpInput = document.getElementById("carrierRtpIp");
+  const carrierRtpPortInput = document.getElementById("carrierRtpPort");
+  const carrierCipherNameInput = document.getElementById("carrierCipherName");
+  const carrierCipherInlineInput = document.getElementById("carrierCipherInline");
+  const coreRtpIpInput = document.getElementById("coreRtpIp");
+  const coreRtpPortInput = document.getElementById("coreRtpPort");
+  const coreCipherNameInput = document.getElementById("coreCipherName");
+  const coreCipherInlineInput = document.getElementById("coreCipherInline");
+  
+  if (carrierRtpIpInput) carrierRtpIpInput.value = "";
+  if (carrierRtpPortInput) carrierRtpPortInput.value = "";
+  if (carrierCipherNameInput) carrierCipherNameInput.value = "";
+  if (carrierCipherInlineInput) carrierCipherInlineInput.value = "";
+  if (coreRtpIpInput) coreRtpIpInput.value = "";
+  if (coreRtpPortInput) coreRtpPortInput.value = "";
+  if (coreCipherNameInput) coreCipherNameInput.value = "";
+  if (coreCipherInlineInput) coreCipherInlineInput.value = "";
+}
+
 function resetPanelsForHome() {
   setUiMode(UI_MODE.IDLE);
   homePanel.hidden = false;
@@ -1754,6 +1785,10 @@ function resetPanelsForHome() {
   hostPanel.hidden = true;
   livePanel.hidden = true;
   postSection.hidden = true;
+  if (manualCorrelationPanel) {
+    manualCorrelationPanel.hidden = true;
+    clearManualCorrelationForm();
+  }
   stopCaptureConnectivityMonitor();
   stopCaptureReconnectWindow();
   activeCaptureHostIds = [];
@@ -1822,6 +1857,7 @@ function showCaptureLocationPanel() {
   hostPanel.hidden = true;
   livePanel.hidden = true;
   postSection.hidden = true;
+  if (manualCorrelationPanel) manualCorrelationPanel.hidden = true;
   updateCaptureLocationDisclaimer();
 }
 
@@ -1834,6 +1870,7 @@ function showCaptureScopePanels() {
   hostPanel.hidden = true;
   livePanel.hidden = true;
   postSection.hidden = true;
+  if (manualCorrelationPanel) manualCorrelationPanel.hidden = true;
 }
 
 function resetUiToInitialState() {
@@ -2983,11 +3020,8 @@ restartCaptureBtn.addEventListener("click", () => {
     });
 });
 
-startBtn.addEventListener("click", async () => {
-  if (captureRecovering || captureAutoRestartInProgress) {
-    setStatus("Attempting to re-establish capture...");
-    return;
-  }
+// Helper function for starting capture (extracted to avoid duplication with PRD confirmation flow)
+async function executeStartCapture() {
   startBtn.disabled = true;
   try {
     const selectedEnvironment = String(environmentInput.value || "").toUpperCase();
@@ -3040,7 +3074,6 @@ startBtn.addEventListener("click", async () => {
     });
 
     setCriticalStatus(`Active capture running in ${data.environment}/${data.region}. Leaving this page will cancel the capture.`, false);
-    setStatus("Capture started.");
     handleStorageState(data.storage_mode, data.storage_notice, data.storage_target);
     addLog("info", `Capture started session_id=${data.session_id}`);
     if (lastCapturePreset) {
@@ -3064,7 +3097,34 @@ startBtn.addEventListener("click", async () => {
     setCaptureUiRunning(false);
     stopCaptureConnectivityMonitor();
     resetHostConnectivityState();
+  } finally {
+    startBtn.disabled = false;
   }
+}
+
+startBtn.addEventListener("click", async () => {
+  if (captureRecovering || captureAutoRestartInProgress) {
+    setStatus("Attempting to re-establish capture...");
+
+    return;
+  }
+  
+  // Check for PRD environment without filters
+  const selectedEnvironment = String(environmentInput.value || "").toUpperCase();
+  const captureFilter = String(filterInput.value || "").trim();
+  const isPrdEnvironment = selectedEnvironment === "PRD" || selectedEnvironment === "PRODUCTION";
+  const hasNoFilter = !captureFilter;
+  
+  if (isPrdEnvironment && hasNoFilter) {
+    // Show warning modal for PRD without filters
+    if (prdCaptureWarningModal) {
+      prdCaptureWarningModal.hidden = false;
+    }
+    return;
+  }
+  
+  // Proceed with capture start
+  await executeStartCapture();
 });
 
 stopBtn.addEventListener("click", async () => {
@@ -3342,6 +3402,13 @@ correlateBtn.addEventListener("click", async () => {
     }
     addLog("error", `Correlation failed: ${err.message}`);
     setStatus(`Correlation failed: ${err.message}`, true);
+
+    // Show manual correlation prompt
+    if (manualCorrelationPromptModal && manualCorrelationPromptMessage) {
+      manualCorrelationPromptMessage.textContent = 
+        `Automatic correlation failed: ${err.message}. Would you like to perform a manual correlation?`;
+      manualCorrelationPromptModal.hidden = false;
+    }
   } finally {
     activeCorrelationJobId = "";
     correlationWaitAbortController = null;
@@ -3412,6 +3479,180 @@ leaveAndCancelBtn?.addEventListener("click", async () => {
   closeCaptureLeaveModal();
   if (typeof action === "function") {
     action();
+  }
+});
+
+// PRD Capture Warning Modal Event Listeners
+cancelPrdCaptureBtn?.addEventListener("click", () => {
+  if (prdCaptureWarningModal) {
+    prdCaptureWarningModal.hidden = true;
+  }
+  setStatus("PRD capture cancelled.");
+});
+
+proceedPrdCaptureBtn?.addEventListener("click", async () => {
+  if (prdCaptureWarningModal) {
+    prdCaptureWarningModal.hidden = true;
+  }
+  // Proceed with capture start
+  await executeStartCapture();
+});
+
+// Manual Correlation Modal Event Listeners
+cancelManualCorrelationBtn?.addEventListener("click", () => {
+  if (manualCorrelationPromptModal) {
+    manualCorrelationPromptModal.hidden = true;
+  }
+});
+
+proceedManualCorrelationBtn?.addEventListener("click", () => {
+  if (manualCorrelationPromptModal) {
+    manualCorrelationPromptModal.hidden = true;
+  }
+  if (manualCorrelationPanel) {
+    // Hide post-capture panel and show manual correlation panel
+    setUiMode(UI_MODE.MANUAL_CORRELATION);
+    manualCorrelationPanel.hidden = false;
+    postSection.hidden = true;
+    addLog("info", "Manual correlation panel opened. Please fill in the RTP/SRTP parameters.");
+  }
+});
+
+cancelManualCorrelationFormBtn?.addEventListener("click", () => {
+  if (manualCorrelationPanel) {
+    manualCorrelationPanel.hidden = true;
+    clearManualCorrelationForm();
+  }
+  // Return to post-capture panel
+  setUiMode(UI_MODE.POST_CAPTURE);
+  postSection.hidden = false;
+  addLog("info", "Manual correlation cancelled.");
+});
+
+runManualCorrelationBtn?.addEventListener("click", async () => {
+  // Gather manual correlation data
+  const carrierRtpIp = document.getElementById("carrierRtpIp")?.value.trim();
+  const carrierRtpPort = document.getElementById("carrierRtpPort")?.value.trim();
+  const carrierCipherName = document.getElementById("carrierCipherName")?.value.trim();
+  const carrierCipherInline = document.getElementById("carrierCipherInline")?.value.trim();
+  const coreRtpIp = document.getElementById("coreRtpIp")?.value.trim();
+  const coreRtpPort = document.getElementById("coreRtpPort")?.value.trim();
+  const coreCipherName = document.getElementById("coreCipherName")?.value.trim();
+  const coreCipherInline = document.getElementById("coreCipherInline")?.value.trim();
+
+  // Validate required fields
+  if (!carrierRtpIp || !carrierRtpPort || !coreRtpIp || !coreRtpPort) {
+    addLog("error", "Please fill in at least the RTP IP and Port for both Carrier and Core.");
+    return;
+  }
+
+  // Validate port numbers
+  const carrierPort = Number(carrierRtpPort);
+  const corePort = Number(coreRtpPort);
+  if (isNaN(carrierPort) || carrierPort < 1 || carrierPort > 65535) {
+    addLog("error", "Invalid Carrier RTP Port. Must be between 1 and 65535.");
+    return;
+  }
+  if (isNaN(corePort) || corePort < 1 || corePort > 65535) {
+    addLog("error", "Invalid Core RTP Port. Must be between 1 and 65535.");
+    return;
+  }
+
+  // Validate IP addresses (basic check)
+  const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+  if (!ipRegex.test(carrierRtpIp)) {
+    addLog("error", "Invalid Carrier RTP IP address format.");
+    return;
+  }
+  if (!ipRegex.test(coreRtpIp)) {
+    addLog("error", "Invalid Core RTP IP address format.");
+    return;
+  }
+
+  try {
+    addLog("info", "Starting manual correlation...");
+    runManualCorrelationBtn.disabled = true;
+
+    const formData = new FormData();
+    formData.append("sip_pcap", sipPcapInput.files[0]);
+    formData.append("call_direction", callDirectionInput.value.trim().toLowerCase());
+    formData.append("debug", String(DEBUG_ENABLED ? "1" : "0"));
+    formData.append("manual_mode", "1");
+    formData.append("carrier_rtp_ip", carrierRtpIp);
+    formData.append("carrier_rtp_port", String(carrierPort));
+    if (carrierCipherName) formData.append("carrier_cipher_name", carrierCipherName);
+    if (carrierCipherInline) formData.append("carrier_cipher_inline", carrierCipherInline);
+    formData.append("core_rtp_ip", coreRtpIp);
+    formData.append("core_rtp_port", String(corePort));
+    if (coreCipherName) formData.append("core_cipher_name", coreCipherName);
+    if (coreCipherInline) formData.append("core_cipher_inline", coreCipherInline);
+
+    const queued = await api("/api/jobs/correlate", { method: "POST", body: formData });
+    activeCorrelationJobId = String(queued.job_id || "");
+
+    addLog("info", `Manual correlation job queued: ${activeCorrelationJobId}`);
+    setStatus("Running manual correlation...");
+
+    // Hide manual correlation panel and show correlation progress
+    manualCorrelationPanel.hidden = true;
+    postSection.hidden = false;
+    setUiMode(UI_MODE.CORRELATING);
+    correlationWaitAbortController = new AbortController();
+    updateCorrelationUiState();
+    setCorrelationProgress(true);
+    startCorrelationLiveLogPolling();
+    finalResults.hidden = true;
+    finalResults.innerHTML = "";
+
+    const status = await waitForJobCompletion(
+      activeCorrelationJobId,
+      "correlate",
+      correlationWaitAbortController.signal
+    );
+
+    stopCorrelationLiveLogPolling();
+
+    if (status.status === "completed") {
+      const data = status.result || {};
+      addLog("info", "✅ Manual correlation completed successfully.");
+      setStatus("Manual correlation completed.", false);
+
+      const hasDownloads =
+        data.final_files &&
+        (data.final_files.encrypted_media || data.final_files.decrypted_media || data.final_files.sip_plus_decrypted_media);
+
+      if (hasDownloads) {
+        renderFinalFiles(data.final_files);
+      } else {
+        const message = String(data.message || "Manual correlation completed but no streams were matched.");
+        renderCorrelationNotice(message, "warn");
+        setStatus(message, true);
+        addLog("warn", message);
+      }
+    } else if (status.status === "canceled") {
+      throw new Error("Manual correlation canceled");
+    } else if (status.status === "failed") {
+      throw new Error(status.error || "Manual correlation job failed");
+    } else {
+      throw new Error(`Unexpected job status: ${status.status || "unknown"}`);
+    }
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      addLog("warn", "Manual correlation canceled by user.");
+      setStatus("Manual correlation canceled.");
+    } else {
+      addLog("error", `Manual correlation failed: ${err.message}`);
+      setStatus(`Manual correlation failed: ${err.message}`, true);
+    }
+  } finally {
+    activeCorrelationJobId = "";
+    correlationWaitAbortController = null;
+    stopCorrelationLiveLogPolling();
+    setCorrelationProgress(false);
+    runManualCorrelationBtn.disabled = false;
+    setUiMode(UI_MODE.POST_CAPTURE);
+    updateCorrelationUiState();
+    clearManualCorrelationForm();
   }
 });
 

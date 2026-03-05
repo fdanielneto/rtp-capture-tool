@@ -1244,6 +1244,57 @@ code {
   background: rgba(220, 38, 38, 0.9);
 }
 
+/* Manual Correlation Form */
+.manual-correlation-form {
+  /* Remove max-width to follow panel container width (980px) */
+}
+
+.manual-correlation-form h3 {
+  margin: 20px 0 10px;
+  color: #c8dcff;
+  font-size: 16px;
+  border-bottom: 1px solid rgba(200, 220, 255, 0.2);
+  padding-bottom: 5px;
+}
+
+.manual-correlation-form h3:first-child {
+  margin-top: 0;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  color: #c8dcff;
+  font-size: 13px;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.form-row input {
+  background: rgba(17, 24, 39, 0.3);
+  border: 1px solid rgba(200, 220, 255, 0.2);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #c8dcff;
+  font-size: 13px;
+  font-family: 'Monaco', 'Courier New', monospace;
+}
+
+.form-row input:focus {
+  outline: none;
+  border-color: rgba(200, 220, 255, 0.5);
+  background: rgba(17, 24, 39, 0.5);
+}
+
+.form-row input::placeholder {
+  color: rgba(200, 220, 255, 0.4);
+  font-style: italic;
+}
+
 /* Responsive grid for raw files cards */
 @media (max-width: 1024px) {
   .raw-files-grid {

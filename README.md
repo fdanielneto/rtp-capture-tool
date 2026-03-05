@@ -1,317 +1,362 @@
-# rtp-capture-tool
+# RTP Capture Tool
 
-Production-oriented web application for first-line VoIP support teams to capture RTP/SRTP remotely from `rpcapd` hosts, correlate SIP with media, and generate troubleshooting PCAP outputs.
+**Production-grade web application for VoIP support teams to remotely capture RTP/SRTP media from rpcapd hosts, correlate SIP signaling with media streams, and generate troubleshooting PCAP files.**
 
-## 1) Requirements
+---
 
-This application currently supports only:
-- macOS
-- Apple Silicon (`arm64`, M1 or newer)
+## Quick Start
 
-The app validates this at startup and exits on unsupported platforms.
+### Prerequisites
 
-Install required system tools:
+**Supported Platforms:**
+- macOS (Apple Silicon M1 or newer, arm64)
+- The app validates platform compatibility at startup
 
+**System Requirements:**
 ```bash
 brew update
 brew install python@3.14 wireshark
 ```
 
-Notes:
-- Python requirement is `>=3.10` (`3.14` is recommended).
-- `dumpcap` is required and must be available in `PATH`.
-- `tshark` is strongly recommended for correlation and troubleshooting flows.
+**Notes:**
+- Python `>=3.10` required (`3.14` recommended)
+- `dumpcap` must be available in `PATH`
+- `tshark` strongly recommended for correlation features
 
-## 2) Install
+---
 
-Clone the repository and create a virtual environment:
+## Installation
+
+### 1. Clone Repository
 
 ```bash
 git clone <your-repo-url>
 cd rtp-capture-tool
+```
+
+### 2. Create Virtual Environment
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Install project dependencies (including dev tools):
+### 3. Install Dependencies
 
 ```bash
 make install
 ```
 
-Alternative equivalent command:
-
+**Alternative:**
 ```bash
 python -m pip install -e '.[dev]'
 ```
 
-## 3) Run
+---
 
-Create local configuration files from templates:
+## Configuration
+
+### Create Config Files
 
 ```bash
 cp config/hosts.yaml.example config/hosts.yaml
 cp config/runtime.env.example config/runtime.env
 ```
 
-Then start the app.
+### Edit `config/hosts.yaml`
 
-### Recommended (single command)
+Define your environments, regions, and media hosts:
+
+```yaml
+rpcap:
+  default_port: 2002
+  auth_mode: null
+
+settings:
+  default_capture_root: ~/Downloads
+
+environments:
+  PRD:
+    regions:
+      US:
+        sub-region:
+          us-west-2:
+            hosts:
+              - id: prd-usw2-rtp-1
+                address: 1.1.1.1
+                description: Production US West media node 1
+                interfaces: ["eth0"]
+```
+
+**Key Configuration Rules:**
+- Each host must define at least one network interface
+- UI region/host selectors populate from this file
+- `default_capture_root` sets session directory (overridable via `RTPHELPER_CAPTURE_ROOT`)
+
+### Configure Runtime Environment (Optional)
+
+Edit `config/runtime.env` for S3 storage, performance tuning, etc.
+
+**Important Variables:**
+```bash
+RTPHELPER_STORAGE_MODE=s3        # or 'local'
+RTPHELPER_S3_ENDPOINT=https://s3.amazonaws.com
+RTPHELPER_S3_REGION=us-west-2
+RTPHELPER_S3_PATH=my-bucket/captures
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+```
+
+---
+
+## Running the Application
+
+### Option 1: Single Command (Recommended)
 
 ```bash
 make start
 ```
 
 This starts:
-- Web/API process on `127.0.0.1:8000`
-- Dedicated correlation worker process
+- **Web/API server** on `127.0.0.1:8000`
+- **Correlation worker** process
 
-Open in browser: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+Open browser: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
 
-### Two-terminal mode
+### Option 2: Two-Terminal Mode
 
-Terminal 1 (web/API):
-
+**Terminal 1 (Web/API):**
 ```bash
 make run-app
 ```
 
-Terminal 2 (worker):
-
+**Terminal 2 (Worker):**
 ```bash
 make run-worker
 ```
 
-## Overview
+---
 
-This project provides a browser workflow to:
-- Start/stop remote packet capture on multiple media hosts (via `rpcapd`).
-- Apply a capture BPF filter (defaults to `udp` when empty).
-- Store raw capture files per host with rolling PCAP chunks (default 500 MB; configurable).
-- Import existing media capture files from local directories or S3.
-- Upload a SIP PCAP and select call direction (`Inbound` or `Outbound`).
-- Auto-detect carrier/core signaling/media context from SIP and run media correlation.
-- Build final outputs:
-  - `media_raw.pcap`
-  - `media_decrypted.pcap`
-  - `SIP_plus_media_decrypted.pcap`
+## Usage Workflow
 
-Primary use case: VoIP incident troubleshooting in trusted internal environments.
+### Start Media Capture
 
-## Current Architecture
+1. Click **"Start Media Capture"**
+2. Select storage destination (**Local** or **AWS S3**)
+3. Choose **Environment → Region → Sub-Region → Hosts**
+4. Set capture filter (leave empty for `udp`) and timeout
+5. Click **"Start Capture"**
+6. Monitor live packet counters
+7. Click **"Stop Capture"** when ready
 
-- Web app: `FastAPI` + Jinja templates + vanilla JS.
-- Capture engine: direct RPCAP client (`rtphelper/rpcap/*`) with multi-host parallel capture and rolling PCAP writer.
-- SIP parser: parses SIP/SDP from uploaded PCAP (`scapy`).
-- Correlation pipeline: `tshark`-based per-leg/per-file filtering.
-- Decryption engine: `pylibsrtp` with SDES inline selection by INVITE/200 OK suite intersection.
-- Logging: structured, human-readable logs with correlation IDs.
+### Correlate SIP with Media
 
-## Repository Structure
+1. Upload **SIP PCAP** file
+2. Select call direction:
+   - **Inbound**: Carrier → RTP Engine → Core
+   - **Outbound**: Core → RTP Engine → Carrier
+3. Click **"Run Correlation"**
+4. Wait for processing (auto-detect + filter + decrypt)
+5. Download final outputs:
+   - `media_raw.pcap` (filtered RTP streams)
+   - `media_decrypted.pcap` (decrypted SRTP)
+   - `SIP_plus_media_decrypted.pcap` (merged SIP + media)
 
-- `rtphelper/web/` - web routes, templates, static assets.
-- `rtphelper/services/capture_service.py` - capture session orchestration.
-- `rtphelper/services/sip_parser.py` - SIP/SDP parsing.
-- `rtphelper/services/decryption_service.py` - SRTP decrypt/copy pipeline.
-- `rtphelper/rpcap/` - RPCAP client, BPF compile, frame normalization, rolling PCAP writer.
-- `rtphelper/config_loader.py` - hosts config schema and validation.
-- `config/hosts.yaml` - host definitions.
-- `config/runtime.env` - runtime environment variables loaded by the app.
-- `scripts/rpcap_diagnose.py` - local compatibility/connectivity diagnostic.
-- `logs/app.log` - rotating application log.
-- `tests/` - unit tests.
+### Import Existing Captures
 
-## Configuration
+1. Click **"Process Call"**
+2. Choose **Local Directory** or **S3**
+3. Upload SIP PCAP and select direction
+4. Run correlation on imported media files
 
-### `config/hosts.yaml`
+---
 
-Edit `config/hosts.yaml` with your environment and host map.
-
-Minimal structure example:
-
-```yaml
-rpcap:
-  default_port: 2002
-  auth_mode: null
-settings:
-  default_capture_root: /absolute/path/for/captures
-environments:
-  PRD:
-    regions:
-      EU:
-        sub-region:
-          eu-west-1:
-            hosts:
-              - id: prd-rtp-host-1
-                address: 1.1.1.1
-                description: PRD EU West 1 media node 1
-                interfaces: ["pkt0"]
-```
-
-Rules:
-- Each host must have at least one interface.
-- UI region and host selectors are populated from this file.
-- `settings.default_capture_root` defines the default session root.
-- `RTPHELPER_CAPTURE_ROOT` overrides `settings.default_capture_root` when set.
-
-### `config/runtime.env`
-
-The app auto-loads `config/runtime.env` at startup.
-You can point to another env file with `RTPHELPER_ENV_FILE=/path/to/file.env`.
-
-### Storage mode (S3 with local fallback)
-
-Default behavior:
-- `RTPHELPER_STORAGE_MODE=s3`
-- App tries S3 first and falls back to local storage on failures.
-
-Important variables:
-- `RTPHELPER_STORAGE_MODE` (`s3` or `local`)
-- `RTPHELPER_S3_ENDPOINT`
-- `RTPHELPER_S3_REGION`
-- `RTPHELPER_S3_PATH` (`<bucket>/<optional/prefix>`)
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_SESSION_TOKEN` (optional)
-
-Performance and queue tuning variables are available in `config/runtime.env.example`.
-
-## Web Workflow (Current)
-
-1. Click `Start Media Capture` or `Process Call`.
-2. For capture, choose destination (`Local` or `AWS S3`).
-3. Select environment, region/sub-region, and hosts.
-4. Optionally set capture filter (empty => `udp`) and timeout.
-5. Start capture and monitor live packet counters.
-6. Stop capture.
-7. In post-capture:
-   - Upload SIP PCAP
-   - Select call direction (`Inbound` or `Outbound`)
-   - Run correlation
-8. Download final files.
-
-Alternative path:
-- Use `Process Call` to import media from local directory or from S3, then run correlation directly.
-
-## Correlation & Processing Logic (Current)
-
-After SIP upload and direction selection:
-
-1. Parse SIP call and resolve signaling/media roles.
-2. Resolve RTP ports from SDP `m=audio` lines.
-3. Build leg filters and combine them with logical `OR`.
-4. For each media PCAP:
-   - count matching packets
-   - create `*-filtered.pcap` when count is above threshold
-5. Merge filtered files into `media_raw.pcap`.
-6. Process each filtered file:
-   - decrypt when possible (`*-decrypted.pcap`)
-   - otherwise copy as `*-no-decrypt-need.pcap`
-7. Merge processed media into `media_decrypted.pcap`.
-8. Merge SIP upload + decrypted media into `SIP_plus_media_decrypted.pcap`.
-
-## Output Layout
+## Output Structure
 
 Session directory:
-
-`<capture_root>/<optional_user_folder>/<session_timestamp>/`
-
-Default `capture_root`:
-- `~/Downloads` (if not overridden)
-
-Common subfolders:
-- `raw/` - raw rolling captures (`<region>-<host>-0001.pcap`, ...)
-- `uploads/` - uploaded SIP PCAPs
-- `decrypted/` - per-file `-decrypted` / `-no-decrypt-need` outputs
-- `combined/`
-  - `filtered/`
-  - `media_raw.pcap`
-  - `media_decrypted.pcap`
-  - `SIP_plus_media_decrypted.pcap`
-
-## Logging
-
-- Console + rotating file log.
-- Log file: `logs/app.log`
-- Rotation: 10 MB per file, 10 backups.
-- Health endpoint: `GET /api/health`
-
-Set log level:
-
-```bash
-export RTPHELPER_LOG_LEVEL=DEBUG
+```
+<capture_root>/<optional_folder>/<session_timestamp>/
+├── raw/                    # Raw rolling captures per host
+├── uploads/                # Uploaded SIP PCAPs
+├── decrypted/              # Per-file decrypted outputs
+└── combined/
+    ├── filtered/           # Per-leg filtered PCAPs
+    ├── media_raw.pcap
+    ├── media_decrypted.pcap
+    └── SIP_plus_media_decrypted.pcap
 ```
 
-## Tests
+**Default `capture_root`:** `~/Downloads` (configurable)
 
-Run unit tests:
+---
+
+## Testing
+
+### Run Unit Tests
 
 ```bash
 make test
 ```
 
-Run local E2E replay tests:
+### Run E2E Tests (Local Replay)
 
 ```bash
 make e2e-tests
 ```
 
-Notes:
-- `e2e-tests/` artifacts are local and can be large.
-- The replay script runs scenarios from local case directories and prints a summary.
+**Note:** E2E artifacts can be large; stored in `e2e-tests/` directory.
+
+---
+
+## Documentation
+
+### Guides
+
+- **[SIP/Media Correlation Guide](docs/CORRELATION_GUIDE.md)** - Deep dive into component detection, filter construction, and manual CLI correlation
+- **[DNS Resolution Strategy](docs/DNS_RESOLUTION.md)** - Host mapping and DNS caching behavior
+
+### Architecture Overview
+
+- **Web:** FastAPI + Jinja2 templates + vanilla JavaScript
+- **Capture:** Direct RPCAP client with multi-host parallel capture and rolling PCAP writer
+- **Parser:** SIP/SDP parsing via `scapy`
+- **Correlation:** `tshark`-based per-leg/per-file filtering with RTP Engine detection
+- **Decryption:** `pylibsrtp` with SDES inline key selection
+- **Logging:** Structured logs with correlation IDs
+
+### Repository Structure
+
+```
+rtphelper/
+├── web/                   # Web routes, templates, static assets
+├── services/
+│   ├── capture_service.py    # Capture orchestration
+│   ├── sip_parser.py          # SIP/SDP parsing
+│   ├── sip_correlation.py     # Media correlation engine
+│   ├── decryption_service.py  # SRTP decryption
+│   └── ...
+├── rpcap/                 # RPCAP client, BPF compiler, PCAP writer
+├── config_loader.py       # Host config schema/validation
+└── ...
+
+config/
+├── hosts.yaml             # Environment/region/host definitions
+└── runtime.env            # Runtime configuration
+
+docs/
+├── CORRELATION_GUIDE.md   # Complete correlation technical reference
+└── DNS_RESOLUTION.md      # DNS resolution strategy
+
+scripts/
+├── rpcap_diagnose.py      # Connectivity diagnostic tool
+└── ...
+
+logs/
+└── app.log                # Rotating application log (10 MB × 10 backups)
+
+tests/
+└── ...                    # Unit tests
+```
+
+---
 
 ## Troubleshooting
 
-### `pylibsrtp` fails to compile/link (macOS Apple Silicon)
+### Installation Issues
 
-Only if installation fails with `pylibsrtp` build/link errors, export:
+**Problem:** `pylibsrtp` fails to compile/link on macOS Apple Silicon
 
+**Solution:**
 ```bash
 export LDFLAGS="-L/opt/homebrew/lib"
 export CPPFLAGS="-I/opt/homebrew/include"
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
-```
-
-Then run installation again:
-
-```bash
 make install
 ```
 
-### Cannot start capture
+---
 
-Run:
+### Capture Issues
 
+**Problem:** Cannot start capture
+
+**Solution:** Run diagnostic tool:
 ```bash
 .venv/bin/python scripts/rpcap_diagnose.py --config config/hosts.yaml
 ```
 
-### Correlation generated no downloads
+**Common causes:**
+- RPCAP host unreachable
+- Firewall blocking port 2002
+- Interface name mismatch
+- Insufficient permissions on remote host
 
-- Check `logs/app.log` and UI logs.
-- Confirm SIP PCAP overlaps the media capture window.
-- Confirm call direction selection.
+---
 
-### Decryption generated only `-no-decrypt-need` files
+### Correlation Issues
 
-- Check SIP SDP/crypto negotiation.
-- Validate that keying material exists for the selected call.
+**Problem:** Correlation generated no downloads
+
+**Check:**
+1. Verify SIP PCAP overlaps media capture time window
+2. Confirm correct call direction selected (Inbound vs Outbound)
+3. Review logs in UI or `logs/app.log`
+4. Ensure SIP call is complete (INVITE + 200 OK/183)
+
+**Problem:** Only `-no-decrypt-need` files generated (no decryption)
+
+**Check:**
+1. Verify SIP contains `a=crypto:` lines in INVITE/200 OK
+2. Confirm crypto suite is supported (AES_CM_128, AES_256_GCM)
+3. Check that RTP is actually encrypted (RTP/SAVP, not RTP/AVP)
+
+**Problem:** `core_to_rtpengine` leg finds no packets (Inbound)
+
+**Known Limitation:** In inbound calls, Core's original 200 OK is modified by RTP Engine. Original Core media endpoint may not be visible.
+
+**Workaround:** Rely on other legs or manually construct filter if Core IP is known.
+
+---
+
+### Logging
+
+**Log Location:** `logs/app.log`
+
+**Log Rotation:** 10 MB per file, 10 backups
+
+**Set Log Level:**
+```bash
+export RTPHELPER_LOG_LEVEL=DEBUG
+make start
+```
+
+**Health Check:**
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+---
 
 ## Security Considerations
 
-`rpcapd` commonly runs with null authentication on port `2002`.
-Use only inside trusted internal networks.
+**⚠️ WARNING:** RPCAP commonly runs with **null authentication** on port `2002`. Use only in trusted internal networks.
 
-Recommendations:
-- Restrict RPCAP access via firewall/ACL.
-- Never expose RPCAP endpoints publicly.
-- Keep `config/hosts.yaml` tightly controlled.
+**Recommendations:**
+- Restrict RPCAP access via firewall/ACL
+- Never expose RPCAP endpoints publicly
+- Keep `config/hosts.yaml` access-controlled
+- Review `runtime.env` for sensitive credentials (AWS keys, etc.)
 
-## Limitations (Current)
+---
 
-- SIP parsing and transaction pairing are best-effort for complex SIP topologies.
-- Decryption depends on valid keying material in signaling context.
-- Some environments require `tshark`/`dumpcap` permission and PATH tuning.
+## Known Limitations
+
+- SIP parsing and transaction pairing are best-effort for complex topologies
+- Decryption depends on valid keying material in SIP signaling
+- Some environments require `tshark`/`dumpcap` permission tuning
+- Multi-leg calls with >2 Call-IDs may require manual correlation
+
+---
 
 ## CLI (Legacy)
 
@@ -323,4 +368,38 @@ rtphelper decrypt
 rtphelper web
 ```
 
-Recommended operational path is the web UI.
+**Recommended:** Use web UI for production workflows.
+
+---
+
+## Contributing
+
+Run tests before submitting changes:
+
+```bash
+make test
+make e2e-tests
+```
+
+Follow existing code style and add tests for new features.
+
+---
+
+## License
+
+[Specify license here]
+
+---
+
+## Support
+
+For issues, questions, or feature requests:
+- Check `logs/app.log` first
+- Review [CORRELATION_GUIDE.md](docs/CORRELATION_GUIDE.md) for correlation troubleshooting
+- Run `scripts/rpcap_diagnose.py` for capture connectivity issues
+
+---
+
+**Version:** 1.0  
+**Last Updated:** March 5, 2026
+

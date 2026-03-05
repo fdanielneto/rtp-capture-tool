@@ -1,0 +1,69 @@
+# Outbound calls with direct media (no RTP Engine / XCC)
+name: outbound_no_xcc
+description: "Outbound calls with direct media path (no RTP Engine cross-connect)"
+priority: 60
+enabled: true
+
+detection:
+  direction: outbound
+  rules:
+    - type: direction_match
+      direction: outbound
+      description: "Outbound call detection"
+
+correlation:
+  strategy: configurable
+  force_direction: outbound
+  
+  config:
+    # IP extraction for direct media
+    carrier_ip_source: last_invite.dst_ip
+    core_ip_source: first_invite.src_ip
+    
+    # Response priority
+    response_priority: [200]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    
+    # RTP Engine detection DISABLED (direct media)
+    rtp_engine_detection: disabled
+    
+    # Call-ID grouping DISABLED (single Call-ID)
+    group_multi_call_ids: false
+    
+    # Re-INVITE handling
+    filter_reinvites: true
+  
+  annotations:
+    - "Correlator: ConfigurableCorrelator (Outbound Direct Media)"
+    - "Features: No RTP Engine, Single Call-ID"
+  
+  notes: |
+    Outbound calls with direct media path (2-leg topology).
+    
+    Call Flow:
+    - Core → Carrier (direct RTP/SRTP)
+    - No RTP Engine / media proxy in path
+    - Single Call-ID throughout
+    
+    Media Path:
+    - Core sends RTP directly to Carrier
+    - Carrier sends RTP directly to Core
+    
+    Use Cases:
+    - WebRTC outbound direct media
+    - SIP trunk outbound without transcoding
+    - Test environments without RTP Engine
+
+# Filter configuration using direct topology template
+filters:
+  template_set: direct_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+  
+  notes: |
+    Uses built-in "direct_topology" template set for 2-leg calls.
+    
+    Generated filters:
+    - Step 1: Core → Carrier (RTP from core)
+    - Step 2: Carrier → Core (RTP return path)
