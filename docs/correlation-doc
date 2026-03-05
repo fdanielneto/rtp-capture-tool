@@ -1,0 +1,1491 @@
+# Correlation Case YAML Reference
+
+Complete reference guide for correlation case YAML configuration files.
+
+**Location**: `rtphelper/correlation_cases/*.yaml`
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Root Fields](#root-fields)
+3. [Detection Section](#detection-section)
+4. [Correlation Section](#correlation-section)
+5. [Filters Section](#filters-section)
+6. [Priority Guidelines](#priority-guidelines)
+7. [Complete Examples](#complete-examples)
+
+---
+
+## Overview
+
+Correlation cases are YAML files that define:
+- **Detection rules**: When this case should be used (headers, direction, methods)
+- **Correlation behavior**: How to extract IPs and media endpoints
+- **Filter generation**: Which tshark filter templates to use
+
+### File Structure
+
+```yaml
+name: <case_name>
+description: <human_readable_description>
+priority: <0-100>
+enabled: <true|false>
+
+detection:
+  # Detection rules...
+
+correlation:
+  # Correlation behavior...
+
+filters:
+  # Filter generation config...
+```
+
+---
+
+## Root Fields
+
+### `name` (required)
+
+**Type**: `string`
+
+**Purpose**: Unique identifier for this correlation case. Used in logs and metrics.
+
+**Naming Convention**:
+- `inbound_*` / `outbound_*` - Direction-specific cases
+- `*_xcc` / `*_no_xcc` - RTP Engine presence
+- `*_2cid` - Multi Call-ID scenarios
+- `*-fallback` - Fallback/recovery cases
+
+**Examples**:
+```yaml
+name: inbound_xcc
+name: outbound_2cid
+name: inbound_pstn_carrier
+name: early_media_183-fallback
+```
+
+---
+
+### `description` (required)
+
+**Type**: `string`
+
+**Purpose**: Human-readable description of when this case applies.
+
+**Best Practices**:
+- Be specific about topology (e.g., "RTP Engine 3-hop")
+- Mention key characteristics (e.g., "Multi Call-ID B2BUA")
+- Include example scenarios
+
+**Examples**:
+```yaml
+description: "Inbound calls with RTP Engine cross-connect (XCC header present)"
+description: "Outbound calls with 2 Call-IDs (B2BUA scenario)"
+description: "Early media negotiation with 183 Session Progress responses"
+```
+
+---
+
+### `priority` (required)
+
+**Type**: `integer` (0-100)
+
+**Purpose**: Controls evaluation order. **Higher priority = evaluated first**.
+
+**Effect**: Cases are sorted descending `(100 → 0)` before evaluation. First match wins.
+
+**Value Ranges**:
+
+| Range | Purpose | Examples |
+|-------|---------|----------|
+| 100-90 | Test cases | `test_templates_rtp_engine`, `test_config` |
+| 89-80 | High-specificity cases | `inbound_2cid`, `xcc_fallback_blocked` |
+| 79-70 | RTP Engine with XCC | `inbound_xcc`, `outbound_xcc`, `early_media_183` |
+| 69-60 | Direct media (no RTP Engine) | `inbound_no_xcc`, `outbound_no_xcc` |
+| 59-50 | PSTN carrier cases | `inbound_pstn_carrier` |
+| 49-40 | RTP Engine fallbacks | `inbound_with_rtp_engine-fallback` |
+| 39-30 | General fallbacks | `response_hop_fallback` |
+| 29-10 | Generic direction cases | `generic_inbound`, `generic_outbound` |
+| 9-0 | Last resort | `unknown` (priority 0) |
+
+**Examples**:
+```yaml
+priority: 80  # High priority (multi Call-ID detection)
+priority: 60  # Medium priority (standard cases)
+priority: 10  # Low priority (generic fallback)
+priority: 0   # Last resort (unknown case)
+```
+
+**Important**: Cases with the same priority are evaluated in alphabetical order by filename.
+
+---
+
+### `enabled` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: Allows temporarily disabling a case without deleting the file.
+
+**Use Cases**:
+- Disable test cases in production
+- Temporarily disable problematic cases
+- A/B testing different correlation strategies
+
+**Examples**:
+```yaml
+enabled: true   # Case is active (default)
+enabled: false  # Case is skipped during evaluation
+```
+
+---
+
+## Detection Section
+
+The `detection` section defines **when** this correlation case should be used.
+
+### Structure
+
+```yaml
+detection:
+  direction: <inbound|outbound|both>
+  method: <INVITE|BYE|...>  # Optional
+  headers:
+    - pattern: <header_prefix>
+      case_insensitive: <true|false>
+      required: <true|false>
+```
+
+---
+
+### `detection.direction` (required)
+
+**Type**: `string`
+
+**Purpose**: Match calls by traffic direction.
+
+**Values**:
+- `"inbound"` - Only match inbound calls (carrier → core)
+- `"outbound"` - Only match outbound calls (core → carrier)
+- `"both"` - Match calls in either direction
+
+**Examples**:
+```yaml
+detection:
+  direction: inbound  # Only inbound calls
+
+detection:
+  direction: both  # Inbound or outbound
+```
+
+---
+
+### `detection.method` (optional)
+
+**Type**: `string`
+
+**Purpose**: Match calls containing specific SIP method.
+
+**Common Values**:
+- `"INVITE"` - Initial call setup or re-INVITE
+- `"BYE"` - Call termination
+- `"CANCEL"` - Call cancellation
+- `"UPDATE"` - Mid-call updates
+- `"ACK"` - Acknowledgment
+
+**Note**: Matching is case-insensitive.
+
+**Examples**:
+```yaml
+detection:
+  method: INVITE  # Only calls with INVITE messages
+
+detection:
+  method: null  # No method filtering (any method)
+```
+
+---
+
+### `detection.headers` (optional)
+
+**Type**: `list` of header rules
+
+**Purpose**: Match calls by presence/absence of specific SIP headers.
+
+**Logic**:
+- If ANY header rule matches → case matches (OR logic)
+- If ALL `required: true` rules fail → case fails
+- Empty list = no header filtering
+
+#### Header Rule Fields
+
+##### `pattern` (required)
+
+**Type**: `string`
+
+**Purpose**: Header prefix to match (e.g., `"X-Customer-Class"` matches `"X-Customer-Class: premium"`).
+
+**Matching**: Uses `startswith()` on header name.
+
+**Examples**:
+```yaml
+headers:
+  - pattern: "X-Customer-Class"  # Matches any X-Customer-Class header
+  - pattern: "Diversion"         # Matches Diversion header
+  - pattern: "P-Asserted-Identity"  # Matches PAI header
+```
+
+##### `case_insensitive` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: Control case sensitivity of pattern matching.
+
+**Examples**:
+```yaml
+headers:
+  - pattern: "x-customer-class"
+    case_insensitive: true  # Matches "X-Customer-Class", "x-CUSTOMER-class", etc.
+
+  - pattern: "X-Custom-ID"
+    case_insensitive: false  # Exact case match required
+```
+
+##### `required` (optional)
+
+**Type**: `boolean`
+
+**Default**: `false`
+
+**Purpose**: Make this header mandatory for case to match.
+
+**Logic**:
+- `required: true` → If missing, case immediately fails
+- `required: false` → Optional header (OR with other headers)
+
+**Examples**:
+```yaml
+headers:
+  # At least ONE of these must be present:
+  - pattern: "Diversion"
+    required: false
+  - pattern: "P-Asserted-Identity"
+    required: false
+
+  # This header MUST be present:
+  - pattern: "X-Mandatory-Header"
+    required: true
+```
+
+#### Header Matching Examples
+
+**Example 1: Detect calls with custom headers**
+```yaml
+detection:
+  direction: inbound
+  headers:
+    - pattern: "X-Customer-Class"
+      case_insensitive: true
+      required: false
+```
+
+**Example 2: PSTN carrier detection**
+```yaml
+detection:
+  direction: inbound
+  headers:
+    - pattern: "Diversion"
+      required: false
+    - pattern: "P-Asserted-Identity"
+      required: false
+  # Matches if EITHER Diversion OR PAI present
+```
+
+**Example 3: Multi Call-ID B2BUA**
+```yaml
+detection:
+  direction: both
+  headers:
+    - pattern: "X-Account-ID"
+      required: true
+  # Must have X-Account-ID header
+```
+
+**Example 4: No header filtering**
+```yaml
+detection:
+  direction: inbound
+  headers: []  # No header requirements
+```
+
+---
+
+## Correlation Section
+
+The `correlation` section defines **how** to perform correlation and extract endpoints.
+
+### Structure
+
+```yaml
+correlation:
+  strategy: <generic|configurable|class_path>
+  force_direction: <inbound|outbound|null>  # Optional
+  annotations: []  # Optional
+  notes: ""  # Optional
+  config:
+    # Runtime behavior configuration...
+```
+
+---
+
+### `correlation.strategy` (required)
+
+**Type**: `string`
+
+**Purpose**: Select correlation algorithm to use.
+
+**Values**:
+- `"generic"` - Legacy correlation logic (fallback)
+- `"configurable"` - New dynamic correlation with config-driven behavior
+- `"<class_path>"` - Custom correlator class (e.g., `"InboundPSTNCarrierCorrelator"`)
+
+**Recommendations**:
+- Use `"configurable"` for new cases (most flexible)
+- Use `"generic"` for legacy compatibility
+- Use class path only for highly specialized logic
+
+**Examples**:
+```yaml
+correlation:
+  strategy: configurable  # Recommended
+
+correlation:
+  strategy: generic  # Legacy fallback
+
+correlation:
+  strategy: InboundPSTNCarrierCorrelator  # Custom class
+```
+
+---
+
+### `correlation.force_direction` (optional)
+
+**Type**: `string` or `null`
+
+**Default**: `null`
+
+**Purpose**: Override detected direction (rarely needed).
+
+**Values**:
+- `null` - Use detected direction
+- `"inbound"` - Force inbound processing
+- `"outbound"` - Force outbound processing
+
+**Use Cases**:
+- Fixing mislabeled captures
+- Special carrier routing scenarios
+
+**Examples**:
+```yaml
+correlation:
+  force_direction: null  # Use detected direction (default)
+
+correlation:
+  force_direction: inbound  # Force inbound even if detected as outbound
+```
+
+---
+
+### `correlation.annotations` (optional)
+
+**Type**: `list` of strings
+
+**Default**: `[]`
+
+**Purpose**: Metadata tags for filtering, search, or documentation.
+
+**Examples**:
+```yaml
+correlation:
+  annotations:
+    - "production"
+    - "carrier:twilio"
+    - "topology:rtp_engine"
+
+correlation:
+  annotations:
+    - "experimental"
+    - "requires_review"
+```
+
+---
+
+### `correlation.notes` (optional)
+
+**Type**: `string`
+
+**Default**: `""`
+
+**Purpose**: Free-form documentation notes.
+
+**Examples**:
+```yaml
+correlation:
+  notes: |
+    This case handles Twilio carrier calls with specific SDP negotiation.
+    Known limitation: Does not support ICE candidates.
+```
+
+---
+
+### `correlation.config` (optional)
+
+**Type**: `object`
+
+**Purpose**: Runtime behavior configuration for `configurable` strategy.
+
+**Structure**:
+```yaml
+correlation:
+  config:
+    # IP extraction
+    carrier_ip_source: <source_expression>
+    core_ip_source: <source_expression>
+    xcc_ip_source: <source_expression>
+    
+    # Response finding
+    response_priority: [<status_codes>]
+    enable_hop_fallback: <true|false>
+    enable_adjacent_packet_search: <true|false>
+    block_xcc_responses: <true|false>
+    
+    # RTP Engine detection
+    rtp_engine_detection: <enabled|disabled|optional>
+    
+    # Special handling
+    filter_reinvites: <true|false>
+    group_multi_call_ids: <true|false>
+```
+
+---
+
+#### `config.carrier_ip_source` (optional)
+
+**Type**: `string` or `null`
+
+**Purpose**: Define how to extract carrier IP address.
+
+**Expression Syntax**:
+- `"first_invite.src_ip"` - Source IP of first INVITE
+- `"first_invite.dst_ip"` - Destination IP of first INVITE
+- `"last_invite.src_ip"` - Source IP of last INVITE
+- `"last_invite.dst_ip"` - Destination IP of last INVITE
+
+**Examples**:
+```yaml
+config:
+  carrier_ip_source: "first_invite.src_ip"  # Inbound: carrier sends first INVITE
+
+config:
+  carrier_ip_source: "last_invite.dst_ip"  # Outbound: carrier receives last INVITE
+```
+
+---
+
+#### `config.core_ip_source` (optional)
+
+**Type**: `string` or `null`
+
+**Purpose**: Define how to extract core IP address.
+
+**Expression Syntax**: Same as `carrier_ip_source`.
+
+**Examples**:
+```yaml
+config:
+  core_ip_source: "last_invite.dst_ip"  # Inbound: core receives last INVITE
+
+config:
+  core_ip_source: "first_invite.src_ip"  # Outbound: core sends first INVITE
+```
+
+---
+
+#### `config.xcc_ip_source` (optional)
+
+**Type**: `string` or `null`
+
+**Purpose**: Define how to extract RTP Engine IP (when XCC header present).
+
+**Expression Syntax**:
+- `"invite_with_changed_sdp.src_ip"` - IP of INVITE that modified SDP
+- `"invite_with_xcc_header.src_ip"` - IP of INVITE with XCC header
+
+**Examples**:
+```yaml
+config:
+  xcc_ip_source: "invite_with_changed_sdp.src_ip"
+```
+
+---
+
+#### `config.response_priority` (optional)
+
+**Type**: `list` of integers
+
+**Default**: `[183, 200]`
+
+**Purpose**: Order of SIP response codes to search for media endpoints.
+
+**Common Values**:
+- `[183, 200]` - Try 183 Session Progress first, then 200 OK (early media)
+- `[200, 183]` - Try 200 OK first, then 183 (standard flow)
+- `[200]` - Only use 200 OK responses
+- `[183]` - Only use 183 Session Progress
+
+**Logic**: Searches responses in order, uses first match found.
+
+**Examples**:
+```yaml
+config:
+  response_priority: [183, 200]  # Prefer early media (183)
+
+config:
+  response_priority: [200]  # Ignore early media, only use final 200 OK
+```
+
+---
+
+#### `config.enable_hop_fallback` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: If no response found for INVITE, try previous INVITE in chain.
+
+**Use Cases**:
+- Multi-hop scenarios where some INVITEs lack responses
+- Incomplete captures
+
+**Examples**:
+```yaml
+config:
+  enable_hop_fallback: true  # Search previous hops if no response
+
+config:
+  enable_hop_fallback: false  # Strict: fail if no response found
+```
+
+---
+
+#### `config.enable_adjacent_packet_search` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: If no matching response found, search nearby packet numbers.
+
+**Use Cases**:
+- Out-of-order packets
+- Response fragmentation
+
+**Examples**:
+```yaml
+config:
+  enable_adjacent_packet_search: true  # Search ±N packets if no match
+
+config:
+  enable_adjacent_packet_search: false  # Strict packet matching
+```
+
+---
+
+#### `config.block_xcc_responses` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: Exclude responses from RTP Engine when extracting carrier/core media.
+
+**Reason**: RTP Engine responses contain internal media endpoints, not actual carrier/core endpoints.
+
+**Examples**:
+```yaml
+config:
+  block_xcc_responses: true  # Ignore RTP Engine responses (recommended)
+
+config:
+  block_xcc_responses: false  # Include all responses (may cause incorrect IPs)
+```
+
+---
+
+#### `config.rtp_engine_detection` (optional)
+
+**Type**: `string`
+
+**Default**: `"enabled"`
+
+**Purpose**: Control RTP Engine detection behavior.
+
+**Values**:
+- `"enabled"` - Detect RTP Engine, extract 3rd leg if present
+- `"disabled"` - Skip RTP Engine detection entirely
+- `"optional"` - Try to detect, but don't fail if not found
+
+**Examples**:
+```yaml
+config:
+  rtp_engine_detection: enabled  # Detect XCC/RTP Engine (default)
+
+config:
+  rtp_engine_detection: disabled  # Direct media only (no 3-hop)
+```
+
+---
+
+#### `config.filter_reinvites` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: Exclude re-INVITEs when extracting media endpoints.
+
+**Reason**: Re-INVITEs (hold, resume, codec change) can introduce incorrect IPs.
+
+**Examples**:
+```yaml
+config:
+  filter_reinvites: true  # Exclude re-INVITEs (recommended)
+
+config:
+  filter_reinvites: false  # Include all INVITEs (including re-INVITEs)
+```
+
+---
+
+#### `config.group_multi_call_ids` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: Group multiple Call-IDs from the same B2BUA call.
+
+**Use Cases**:
+- B2BUA scenarios with 2+ Call-IDs
+- SIP ALG rewriting Call-IDs
+
+**Examples**:
+```yaml
+config:
+  group_multi_call_ids: true  # Group related Call-IDs (B2BUA)
+
+config:
+  group_multi_call_ids: false  # Treat each Call-ID separately
+```
+
+---
+
+### Complete `correlation.config` Example
+
+```yaml
+correlation:
+  strategy: configurable
+  config:
+    # IP extraction
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    xcc_ip_source: "invite_with_changed_sdp.src_ip"
+    
+    # Response finding
+    response_priority: [183, 200]  # Try early media first
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    
+    # RTP Engine detection
+    rtp_engine_detection: enabled
+    
+    # Special handling
+    filter_reinvites: true
+    group_multi_call_ids: true
+```
+
+---
+
+## Filters Section
+
+The `filters` section defines **how to generate tshark filters** for RTP extraction.
+
+### Structure
+
+```yaml
+filters:
+  template_set: <rtp_engine_topology|direct_topology|null>
+  use_default_templates: <true|false>
+  custom_templates_enabled: <false>
+  # Custom templates (advanced):
+  custom_templates:
+    enabled: <true|false>
+    steps:
+      - step: <1-4>
+        leg_name: <display_name>
+        leg_key: <carrier|core|rtp_engine>
+        description: <step_description>
+        phase1_template: <jinja2_template>
+        phase2_template: <jinja2_template>
+        required_fields: [<field1>, <field2>]
+```
+
+---
+
+### `filters.template_set` (optional)
+
+**Type**: `string` or `null`
+
+**Default**: `null`
+
+**Purpose**: Select pre-built filter template set.
+
+**Values**:
+- `"rtp_engine_topology"` - 4 filters for 3-hop topology (carrier ↔ RTP Engine ↔ core)
+- `"direct_topology"` - 2 filters for 2-hop topology (carrier ↔ core)
+- `null` - No template set (use custom or legacy logic)
+
+**Recommended**:
+- Use `"rtp_engine_topology"` for cases with XCC/RTP Engine
+- Use `"direct_topology"` for cases without RTP Engine
+- Use `null` for generic/unknown cases
+
+**Examples**:
+```yaml
+filters:
+  template_set: rtp_engine_topology  # 4 filters (3-hop)
+
+filters:
+  template_set: direct_topology  # 2 filters (2-hop)
+
+filters:
+  template_set: null  # No template (legacy)
+```
+
+---
+
+### `filters.use_default_templates` (optional)
+
+**Type**: `boolean`
+
+**Default**: `true`
+
+**Purpose**: Use built-in Jinja2 templates for filter generation.
+
+**Reason**: Default templates handle 95% of scenarios correctly.
+
+**Examples**:
+```yaml
+filters:
+  use_default_templates: true  # Use built-in templates (recommended)
+
+filters:
+  use_default_templates: false  # Custom templates only
+```
+
+---
+
+### `filters.custom_templates_enabled` (optional)
+
+**Type**: `boolean`
+
+**Default**: `false`
+
+**Purpose**: Enable custom filter templates (advanced).
+
+**Use Cases**:
+- Specialized filter logic
+- Carrier-specific requirements
+- Custom filtering beyond IP:port pairs
+
+**Note**: Requires defining `custom_templates.steps` (complex, not recommended for most users).
+
+**Examples**:
+```yaml
+filters:
+  custom_templates_enabled: false  # Use default templates (recommended)
+
+filters:
+  custom_templates_enabled: true  # Use custom templates
+  custom_templates:
+    steps:
+      # Advanced: Define custom Jinja2 templates...
+```
+
+---
+
+### Template Set Details
+
+#### `rtp_engine_topology` (3-hop)
+
+Generates **4 filters**:
+
+1. **Carrier → RTP Engine** (carrier leg, Phase 1)
+   - Source: carrier IP + RTP port
+   - Destination: RTP Engine IP + RTP port
+
+2. **Carrier ← RTP Engine** (carrier leg, Phase 2)
+   - Source: RTP Engine IP + RTP port
+   - Destination: carrier IP + RTP port
+
+3. **RTP Engine → Core** (core leg, Phase 1)
+   - Source: RTP Engine IP + different RTP port
+   - Destination: core IP + RTP port
+
+4. **RTP Engine ← Core** (core leg, Phase 2)
+   - Source: core IP + RTP port
+   - Destination: RTP Engine IP + different RTP port
+
+**Use Case**: Calls with RTP Engine cross-connect, XCC header present.
+
+---
+
+#### `direct_topology` (2-hop)
+
+Generates **2 filters**:
+
+1. **Carrier → Core** (Phase 1)
+   - Source: carrier IP + RTP port
+   - Destination: core IP + RTP port
+
+2. **Carrier ← Core** (Phase 2)
+   - Source: core IP + RTP port
+   - Destination: carrier IP + RTP port
+
+**Use Case**: Direct media calls, no RTP Engine.
+
+---
+
+### Filters Example
+
+**Example 1: RTP Engine case**
+```yaml
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+**Example 2: Direct media case**
+```yaml
+filters:
+  template_set: direct_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+**Example 3: Generic case (no templates)**
+```yaml
+filters:
+  template_set: null
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+## Priority Guidelines
+
+### Decision Tree
+
+```
+Is this a test case?
+├─ YES → Priority 90-100
+└─ NO → Continue
+
+Does it have 2+ Call-IDs?
+├─ YES → Priority 75-80
+└─ NO → Continue
+
+Does it have RTP Engine (XCC header)?
+├─ YES → Priority 65-75
+└─ NO → Continue
+
+Is it direct media (no RTP Engine)?
+├─ YES → Priority 60-65
+└─ NO → Continue
+
+Is it a fallback/recovery case?
+├─ YES → Priority 30-50
+└─ NO → Continue
+
+Is it a generic catch-all?
+├─ YES → Priority 10-20
+└─ NO → Priority 0 (unknown)
+```
+
+### Priority Ranges Summary
+
+| Priority | Category | Examples |
+|----------|----------|----------|
+| 100 | Tests | `test_templates_*` |
+| 90-95 | Reserved | Future use |
+| 80-89 | High-specificity | Multi Call-ID, blocked XCC |
+| 70-79 | RTP Engine + XCC | `inbound_xcc`, `early_media_183` |
+| 60-69 | Direct media | `inbound_no_xcc`, `reinvite_detection` |
+| 50-59 | PSTN carriers | `inbound_pstn_carrier` |
+| 40-49 | RTP Engine fallbacks | `inbound_with_rtp_engine-fallback` |
+| 30-39 | General fallbacks | `response_hop_fallback` |
+| 10-29 | Generic direction | `generic_inbound` |
+| 0-9 | Unknown | `unknown` (priority 0) |
+
+### Ordering Rules
+
+1. **Highest priority first**: Cases evaluated from priority 100 → 0
+2. **First match wins**: Evaluation stops at first matching case
+3. **Alphabetical tie-breaker**: Same priority = alphabetical order by filename
+4. **Disabled cases skipped**: `enabled: false` cases never evaluated
+
+### Priority Anti-Patterns
+
+❌ **Don't**:
+- Set all cases to priority 50 (no ordering)
+- Use priorities > 100 (reserved for system)
+- Set fallback cases higher than specific cases
+- Forget to test priority changes
+
+✅ **Do**:
+- Use priority ranges as documented
+- Test case order with `make start` (check logs)
+- Keep test cases at priority 90+ so they're easy to identify
+- Document why you set a specific priority
+
+---
+
+## Complete Examples
+
+### Example 1: Inbound with RTP Engine (XCC)
+
+**File**: `rtphelper/correlation_cases/inbound_xcc.yaml`
+
+```yaml
+name: inbound_xcc
+description: "Inbound calls with RTP Engine cross-connect (XCC header present)"
+priority: 70
+enabled: true
+
+detection:
+  direction: inbound
+  rules:
+    - type: direction_match
+      direction: inbound
+      description: "Inbound call detection"
+
+correlation:
+  strategy: configurable
+  force_direction: null
+  annotations:
+    - "production"
+    - "topology:rtp_engine"
+  notes: ""
+  config:
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    xcc_ip_source: "invite_with_changed_sdp.src_ip"
+    response_priority: [200]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    rtp_engine_detection: enabled
+    filter_reinvites: true
+    group_multi_call_ids: true
+
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+### Example 2: Outbound Direct Media (No RTP Engine)
+
+**File**: `rtphelper/correlation_cases/outbound_no_xcc.yaml`
+
+```yaml
+name: outbound_no_xcc
+description: "Outbound calls with direct media path (no RTP Engine cross-connect)"
+priority: 60
+enabled: true
+
+detection:
+  direction: outbound
+  rules:
+    - type: direction_match
+      direction: outbound
+      description: "Outbound call detection"
+
+correlation:
+  strategy: configurable
+  force_direction: null
+  annotations:
+    - "production"
+    - "topology:direct"
+  notes: ""
+  config:
+    carrier_ip_source: "last_invite.dst_ip"
+    core_ip_source: "first_invite.src_ip"
+    xcc_ip_source: null
+    response_priority: [200]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: false
+    rtp_engine_detection: disabled
+    filter_reinvites: true
+    group_multi_call_ids: false
+
+filters:
+  template_set: direct_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+### Example 3: Multi Call-ID (B2BUA)
+
+**File**: `rtphelper/correlation_cases/inbound_2cid.yaml`
+
+```yaml
+name: inbound_2cid
+description: "Inbound calls with 2 Call-IDs (B2BUA scenario)"
+priority: 80
+enabled: true
+
+detection:
+  direction: inbound
+  rules:
+    - type: multi_call_id
+      min_call_ids: 2
+      description: "At least 2 Call-IDs detected (B2BUA)"
+
+correlation:
+  strategy: configurable
+  force_direction: null
+  annotations:
+    - "production"
+    - "topology:b2bua"
+    - "multi_call_id"
+  notes: |
+    Handles B2BUA scenarios where carrier leg and core leg have different Call-IDs.
+    RTP Engine detection enabled to find 3-hop topology if present.
+  config:
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    xcc_ip_source: "invite_with_changed_sdp.src_ip"
+    response_priority: [183, 200]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    rtp_engine_detection: enabled
+    filter_reinvites: true
+    group_multi_call_ids: true
+
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+### Example 4: PSTN Carrier with Diversion Header
+
+**File**: `rtphelper/correlation_cases/inbound_pstn_carrier.yaml`
+
+```yaml
+name: inbound_pstn_carrier
+description: "Inbound PSTN carrier calls (Diversion/PAI headers)"
+priority: 50
+enabled: true
+
+detection:
+  direction: inbound
+  method: INVITE
+  headers:
+    - pattern: "Diversion"
+      case_insensitive: true
+      required: false
+    - pattern: "P-Asserted-Identity"
+      case_insensitive: true
+      required: false
+  # Matches if EITHER Diversion OR PAI present
+
+correlation:
+  strategy: InboundPSTNCarrierCorrelator  # Custom correlator class
+  force_direction: inbound
+  annotations:
+    - "production"
+    - "carrier:pstn"
+  notes: |
+    Specialized handling for PSTN carrier calls.
+    Diversion or P-Asserted-Identity headers indicate PSTN origin.
+  config:
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    response_priority: [183, 200]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    rtp_engine_detection: enabled
+    filter_reinvites: true
+    group_multi_call_ids: false
+
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+### Example 5: Early Media Fallback
+
+**File**: `rtphelper/correlation_cases/early_media_183-fallback.yaml`
+
+```yaml
+name: early_media_183-fallback
+description: "Early media negotiation with 183 Session Progress"
+priority: 70
+enabled: true
+
+detection:
+  direction: both
+  method: INVITE
+  headers: []  # No specific header requirements
+
+correlation:
+  strategy: configurable
+  force_direction: null
+  annotations:
+    - "fallback"
+    - "early_media"
+  notes: |
+    Prioritizes 183 Session Progress responses for early media scenarios.
+    Falls back to 200 OK if 183 not found.
+  config:
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    xcc_ip_source: "invite_with_changed_sdp.src_ip"
+    response_priority: [183, 200]  # Try 183 FIRST
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    rtp_engine_detection: enabled
+    filter_reinvites: true
+    group_multi_call_ids: true
+
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+### Example 6: Generic Fallback
+
+**File**: `rtphelper/correlation_cases/generic_inbound.yaml`
+
+```yaml
+name: generic_inbound
+description: "Generic inbound call fallback (matches any inbound)"
+priority: 10
+enabled: true
+
+detection:
+  direction: inbound
+  method: null  # Any method
+  headers: []   # No header requirements
+
+correlation:
+  strategy: generic  # Use legacy correlation logic
+  force_direction: null
+  annotations:
+    - "fallback"
+    - "generic"
+  notes: "Catch-all for inbound calls that don't match specific cases"
+  config: null  # Generic strategy doesn't use config
+
+filters:
+  template_set: null  # Use legacy filter logic
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+### Example 7: Disabled Test Case
+
+**File**: `rtphelper/correlation_cases/test_config.yaml`
+
+```yaml
+name: test_config
+description: "Test case for development (disabled in production)"
+priority: 99
+enabled: false  # ← DISABLED
+
+detection:
+  direction: both
+  method: INVITE
+  headers:
+    - pattern: "X-Test-Case"
+      required: true
+
+correlation:
+  strategy: configurable
+  config:
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    response_priority: [200, 183]
+    enable_hop_fallback: true
+    enable_adjacent_packet_search: true
+    block_xcc_responses: true
+    rtp_engine_detection: enabled
+    filter_reinvites: true
+    group_multi_call_ids: true
+
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+```
+
+---
+
+## Troubleshooting
+
+### Case Not Matching
+
+**Problem**: Your PCAP doesn't match expected case.
+
+**Debug Steps**:
+
+1. **Check logs**:
+```bash
+grep "Matched correlation case" logs/app.log
+# Shows which case was actually matched
+
+grep "Loaded correlation case" logs/app.log
+# Shows priority order
+```
+
+2. **Check direction**:
+```yaml
+detection:
+  direction: inbound  # Does this match your PCAP direction?
+```
+
+3. **Check headers**:
+```yaml
+# Add debug logging to see actual headers:
+detection:
+  headers:
+    - pattern: "X-Expected-Header"
+      required: true  # Change to false temporarily
+```
+
+4. **Check priority**:
+```bash
+# Lower-priority case matching first?
+# Increase your case's priority to 80+
+```
+
+### Wrong Template Set
+
+**Problem**: Generated filters don't match topology.
+
+**Debug Steps**:
+
+1. **Check for RTP Engine**:
+```bash
+# Search PCAP for XCC header:
+tshark -r capture.pcap -Y "sip" | grep -i "x-customer-class"
+```
+
+2. **Update template set**:
+```yaml
+filters:
+  # Has XCC header?
+  template_set: rtp_engine_topology  # 4 filters
+
+  # No XCC header (direct media)?
+  template_set: direct_topology  # 2 filters
+```
+
+### Python Cache Issues
+
+**Problem**: Changes not taking effect after editing YAML.
+
+**Solution**:
+```bash
+# Makefile now automatically clears cache:
+make start
+
+# Or manually:
+make clean
+make start
+```
+
+---
+
+## Best Practices
+
+### 1. Start from Example
+
+Copy an existing case similar to your scenario:
+```bash
+cp rtphelper/correlation_cases/inbound_xcc.yaml \
+   rtphelper/correlation_cases/custom_case.yaml
+```
+
+### 2. Test in Isolation
+
+Set high priority (90+) during development:
+```yaml
+priority: 95  # Will be tested first
+enabled: true
+```
+
+### 3. Use Descriptive Names
+
+❌ Bad:
+```yaml
+name: case1
+description: "Custom case"
+```
+
+✅ Good:
+```yaml
+name: inbound_carrier_xyz_with_ice
+description: "Inbound calls from Carrier XYZ with ICE candidates in SDP"
+```
+
+### 4. Document Assumptions
+
+```yaml
+correlation:
+  notes: |
+    Assumptions:
+    - Carrier always sends first INVITE
+    - XCC header always present on INVITE #2
+    - Early media negotiation uses 183 responses
+    
+    Known issues:
+    - Does not handle re-INVITEs with codec changes
+    - Fails if Call-ID changes mid-call
+```
+
+### 5. Use Annotations for Organization
+
+```yaml
+correlation:
+  annotations:
+    - "production"           # Deployment stage
+    - "carrier:twilio"       # Carrier name
+    - "topology:rtp_engine"  # Topology type
+    - "region:us-west"       # Geographic region
+```
+
+### 6. Keep Tests Disabled in Production
+
+```yaml
+# Test cases:
+priority: 90-100
+enabled: false  # Disable in production
+
+# Production cases:
+priority: 10-80
+enabled: true
+```
+
+### 7. Validate YAML Syntax
+
+```bash
+# Before committing:
+python3 -c "import yaml; yaml.safe_load(open('rtphelper/correlation_cases/your_case.yaml'))"
+```
+
+---
+
+## See Also
+
+- **[FILTER_TEMPLATE_SYSTEM.md](FILTER_TEMPLATE_SYSTEM.md)** - Detailed filter template documentation
+- **[CORRELATION_USE_CASES.md](CORRELATION_USE_CASES.md)** - Real-world use case examples
+- **[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)** - Migrating from legacy correlation
+- **Code**: `rtphelper/services/correlation_case_loader.py` - Loader implementation
+- **Code**: `rtphelper/services/sip_correlation.py` - Correlation logic
+
+---
+
+## Quick Reference Card
+
+```yaml
+# Minimal case template
+name: <unique_name>
+description: "<what_this_matches>"
+priority: <0-100>  # Higher = evaluated first
+enabled: <true|false>
+
+detection:
+  direction: <inbound|outbound|both>
+  method: <INVITE|...>  # Optional
+  headers:  # Optional
+    - pattern: "<header_prefix>"
+      case_insensitive: true
+      required: false
+
+correlation:
+  strategy: <configurable|generic>
+  config:  # For "configurable" strategy
+    carrier_ip_source: "first_invite.src_ip"
+    core_ip_source: "last_invite.dst_ip"
+    response_priority: [200, 183]
+    rtp_engine_detection: <enabled|disabled>
+
+filters:
+  template_set: <rtp_engine_topology|direct_topology|null>
+  use_default_templates: true
+```
+
+**Common Priority Ranges**:
+- 80-89: Multi Call-ID, high-specificity
+- 70-79: RTP Engine with XCC
+- 60-69: Direct media (no RTP Engine)
+- 50-59: PSTN carriers
+- 10-20: Generic fallbacks
+- 0: Unknown (last resort)
+
+**Template Sets**:
+- `rtp_engine_topology`: 4 filters (3-hop: carrier ↔ RTP Engine ↔ core)
+- `direct_topology`: 2 filters (2-hop: carrier ↔ core)
+
+**IP Source Expressions**:
+- `first_invite.src_ip` - Source IP of first INVITE
+- `first_invite.dst_ip` - Destination IP of first INVITE
+- `last_invite.src_ip` - Source IP of last INVITE
+- `last_invite.dst_ip` - Destination IP of last INVITE
+- `invite_with_changed_sdp.src_ip` - IP of INVITE that changed SDP (RTP Engine)
+
+---
+
+**Last Updated**: March 5, 2026  
+**Version**: 1.0.0
