@@ -1,0 +1,58 @@
+# Test case for filter template system - RTP Engine topology
+name: test_templates_rtp_engine
+description: "Test case demonstrating filter template system with RTP Engine (4-leg topology)"
+priority: 100
+enabled: true
+
+detection:
+  rules:
+    - type: call_id_pattern
+      pattern: "test-rtp-engine"
+      description: "Test case identifier"
+
+correlation:
+  strategy: configurable
+  
+  config:
+    # Standard IP extraction for RTP Engine scenario
+    carrier_ip_source: first_invite.src_ip
+    core_ip_source: last_invite.dst_ip
+    response_priority: [200, 183]
+    rtp_engine_detection: enabled
+    filter_reinvites: true
+    enable_hop_fallback: true
+    block_xcc_responses: true
+  
+  notes: |
+    Test case demonstrating filter template system with RTP Engine topology.
+    Uses built-in "rtp_engine_topology" template set.
+
+# Filter configuration using templates
+filters:
+  template_set: rtp_engine_topology
+  use_default_templates: true
+  custom_templates_enabled: false
+  
+  # Built-in template set provides 4-leg topology:
+  # Step 1: carrier -> RTP Engine
+  # Step 2: RTP Engine -> carrier
+  # Step 3: RTP Engine -> core
+  # Step 4: core -> RTP Engine
+
+notes: |
+  ## Filter Template System
+  
+  This case uses the built-in "rtp_engine_topology" template set which automatically
+  generates 4-leg RTP Engine filters with proper Phase 1/Phase 2 handling.
+  
+  ### Template Variables Available:
+  - ${carrier.source.ip}, ${carrier.source.port}
+  - ${carrier.destination.ip}, ${carrier.destination.port}
+  - ${core.source.ip}, ${core.source.port}
+  - ${core.destination.ip}, ${core.destination.port}
+  - ${rtpengine.detected_ip}, ${rtpengine.announced_ip}
+  - ${direction} (inbound/outbound)
+  
+  ### Example Phase 2 Filter (Step 1):
+  Inbound: ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+  Outbound: ip.src==${carrier.destination.ip} && udp.srcport==${carrier.destination.port}

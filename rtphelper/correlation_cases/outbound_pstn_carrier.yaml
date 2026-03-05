@@ -1,0 +1,28 @@
+name: outbound_pstn_carrier
+description: Outbound PSTN Carrier calls
+priority: 40
+enabled: true
+
+detection:
+  direction: outbound
+  # No specific headers required for outbound
+  method: INVITE
+
+correlation:
+  strategy: generic
+  force_direction: outbound
+  annotations:
+    - "Correlator: OutboundPSTNCarrierCorrelator"
+  
+  notes: |
+    Characteristics:
+    - Core sends first INVITE with media endpoints
+    - Call flows: Core -> [RTP Engine] -> Carrier
+    - Carrier media: from last INVITE (to carrier) and its 183/200 OK response
+    - Carrier discovery based on last hop destination IP
+    
+    Future optimizations:
+    - Prioritize last hop media endpoints for carrier leg
+    - Validate carrier response codes and timings
+    - Handle asymmetric RTP scenarios (one-way audio detection)
+    - Apply carrier-specific early media handling

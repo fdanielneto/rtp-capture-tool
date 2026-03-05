@@ -1021,11 +1021,35 @@ def _run_correlation_job_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"Uploaded SIP pcap not found for job: {upload_path}")
     call_direction = str(payload.get("call_direction", "")).strip().lower()
     debug = str(payload.get("debug", "0"))
+    manual_mode = str(payload.get("manual_mode", "0"))
+    carrier_rtp_ip = str(payload.get("carrier_rtp_ip", "")).strip()
+    carrier_rtp_port = str(payload.get("carrier_rtp_port", "")).strip()
+    carrier_cipher_name = str(payload.get("carrier_cipher_name", "")).strip()
+    carrier_cipher_inline = str(payload.get("carrier_cipher_inline", "")).strip()
+    core_rtp_ip = str(payload.get("core_rtp_ip", "")).strip()
+    core_rtp_port = str(payload.get("core_rtp_port", "")).strip()
+    core_cipher_name = str(payload.get("core_cipher_name", "")).strip()
+    core_cipher_inline = str(payload.get("core_cipher_inline", "")).strip()
 
     data = upload_path.read_bytes()
     upload = UploadFile(filename=upload_path.name, file=io.BytesIO(data))
     try:
-        return asyncio.run(correlate(sip_pcap=upload, call_direction=call_direction, debug=debug))
+        return asyncio.run(
+            correlate(
+                sip_pcap=upload,
+                call_direction=call_direction,
+                debug=debug,
+                manual_mode=manual_mode,
+                carrier_rtp_ip=carrier_rtp_ip,
+                carrier_rtp_port=carrier_rtp_port,
+                carrier_cipher_name=carrier_cipher_name,
+                carrier_cipher_inline=carrier_cipher_inline,
+                core_rtp_ip=core_rtp_ip,
+                core_rtp_port=core_rtp_port,
+                core_cipher_name=core_cipher_name,
+                core_cipher_inline=core_cipher_inline,
+            )
+        )
     finally:
         try:
             upload.file.close()
@@ -1140,6 +1164,15 @@ async def create_correlation_job(
     sip_pcap: UploadFile = File(...),
     call_direction: str = Form(""),
     debug: str = Form("0"),
+    manual_mode: str = Form("0"),
+    carrier_rtp_ip: str = Form(""),
+    carrier_rtp_port: str = Form(""),
+    carrier_cipher_name: str = Form(""),
+    carrier_cipher_inline: str = Form(""),
+    core_rtp_ip: str = Form(""),
+    core_rtp_port: str = Form(""),
+    core_cipher_name: str = Form(""),
+    core_cipher_inline: str = Form(""),
 ) -> Dict[str, Any]:
     session = CAPTURE_SERVICE.latest_session()
     if session is None:
@@ -1189,6 +1222,15 @@ async def create_correlation_job(
         "storage_notice": session.storage_notice,
         "s3_source_objects": session.s3_source_objects,
         "s3_source_session_prefix": session.s3_source_session_prefix,
+        "manual_mode": str(manual_mode or "0"),
+        "carrier_rtp_ip": str(carrier_rtp_ip or "").strip(),
+        "carrier_rtp_port": str(carrier_rtp_port or "").strip(),
+        "carrier_cipher_name": str(carrier_cipher_name or "").strip(),
+        "carrier_cipher_inline": str(carrier_cipher_inline or "").strip(),
+        "core_rtp_ip": str(core_rtp_ip or "").strip(),
+        "core_rtp_port": str(core_rtp_port or "").strip(),
+        "core_cipher_name": str(core_cipher_name or "").strip(),
+        "core_cipher_inline": str(core_cipher_inline or "").strip(),
     }
     try:
         job = JOB_ORCHESTRATOR.submit("correlate", payload)
@@ -1327,6 +1369,15 @@ async def correlate(
     sip_pcap: UploadFile = File(...),
     call_direction: str = Form(""),
     debug: str = Form("0"),
+    manual_mode: str = Form("0"),
+    carrier_rtp_ip: str = Form(""),
+    carrier_rtp_port: str = Form(""),
+    carrier_cipher_name: str = Form(""),
+    carrier_cipher_inline: str = Form(""),
+    core_rtp_ip: str = Form(""),
+    core_rtp_port: str = Form(""),
+    core_cipher_name: str = Form(""),
+    core_cipher_inline: str = Form(""),
 ) -> Dict[str, Any]:
     session = CAPTURE_SERVICE.latest_session()
     if session is None:
@@ -1396,23 +1447,127 @@ async def correlate(
     else:
         log_lines.append(f"Call-ID: {call.call_id}")
     
-    # Add RTP Engine detection info from new correlation
-    if correlation_ctx and correlation_ctx.rtp_engine.detected:
-        rtp_eng = correlation_ctx.rtp_engine
-        log_lines.append(f"INFO: RTP Engine detected: YES")
-        log_lines.append(f"INFO:   - SDP c= changed: {rtp_eng.original_sdp_ip} -> {rtp_eng.changed_sdp_ip}")
-        log_lines.append(f"INFO:   - Change detected at packet: {rtp_eng.sdp_change_packet}")
-        log_lines.append(f"INFO:   - Engine IP (packet src_ip): {rtp_eng.engine_ip}")
+    # Add Multiple Call IDs detection info
+    if len(all_call_ids) > 1:
+        log_lines.append(f"INFO: Multiple Call IDs: YES")
     else:
-        log_lines.append("INFO: RTP Engine detected: NO")
+        log_lines.append("INFO: Multiple Call IDs: NO")
     
     log_lines.append(_format_log_banner("Step 2: Build RTP filters"))
-    log_lines.append("INFO: RTP request/reply media IP+ports are auto-detected from SIP INVITE/200 OK m=audio.")
-    log_lines.append(f"INFO: Direction: {direction}")
-    log_lines.append(f"INFO: Analysis packet={analysis_packet}")
-
+    
     def _raise_correlation_http_error(message: str) -> None:
         raise HTTPException(status_code=400, detail={"message": message, "log_tail": log_lines})
+
+    # Check for manual correlation mode
+    is_manual_mode = str(manual_mode or "0").strip() in ("1", "true", "yes")
+    
+    if is_manual_mode:
+        # MANUAL CORRELATION MODE - Use user-provided RTP/SRTP parameters
+        log_lines.append("INFO: **MANUAL CORRELATION MODE** - Using manually provided RTP/SRTP parameters")
+        log_lines.append(f"INFO: Direction: {direction}")
+        log_lines.append(f"INFO: Carrier RTP: {carrier_rtp_ip}:{carrier_rtp_port}")
+        log_lines.append(f"INFO: Core RTP: {core_rtp_ip}:{core_rtp_port}")
+        
+        # Validate required manual params
+        if not carrier_rtp_ip or not carrier_rtp_port or not core_rtp_ip or not core_rtp_port:
+            log_lines.append("ERROR: Manual mode requires Carrier and Core RTP IP+Port")
+            _raise_correlation_http_error("Manual mode requires Carrier and Core RTP IP+Port")
+        
+        try:
+            carrier_port_int = int(carrier_rtp_port)
+            core_port_int = int(core_rtp_port)
+        except ValueError:
+            log_lines.append("ERROR: RTP ports must be valid integers")
+            _raise_correlation_http_error("RTP ports must be valid integers")
+        
+        # Build manual steps
+        steps, endpoint_debug = _build_manual_rtp_steps(
+            direction=direction,
+            carrier_request_ip=carrier_rtp_ip,
+            carrier_reply_ip=carrier_rtp_ip,
+            carrier_request_port=carrier_port_int,
+            carrier_reply_port=carrier_port_int,
+            core_request_port=core_port_int,
+            core_request_ip=core_rtp_ip,
+            core_reply_ip=core_rtp_ip,
+            core_reply_port=core_port_int,
+        )
+        
+        # Build crypto materials if provided
+        selected_crypto: List[SdesCryptoMaterial] = []
+        if carrier_cipher_name and carrier_cipher_inline:
+            log_lines.append(f"INFO: Carrier SRTP: {carrier_cipher_name} - {carrier_cipher_inline[:30]}...")
+            selected_crypto.append(
+                SdesCryptoMaterial(
+                    tag=1,
+                    cipher_suite=carrier_cipher_name,
+                    inline_value=carrier_cipher_inline,
+                    leg_name="carrier",
+                )
+            )
+        if core_cipher_name and core_cipher_inline:
+            log_lines.append(f"INFO: Core SRTP: {core_cipher_name} - {core_cipher_inline[:30]}...")
+            selected_crypto.append(
+                SdesCryptoMaterial(
+                    tag=2,
+                    cipher_suite=core_cipher_name,
+                    inline_value=core_cipher_inline,
+                    leg_name="core",
+                )
+            )
+        
+        encrypted_likely = bool(selected_crypto)
+        leg_encryption_status: Dict[str, bool] = {
+            "carrier": bool(carrier_cipher_name and carrier_cipher_inline),
+            "core": bool(core_cipher_name and core_cipher_inline),
+        }
+        
+        # Build endpoints from manual data
+        all_endpoints = {
+            (carrier_rtp_ip, carrier_port_int),
+            (core_rtp_ip, core_port_int),
+        }
+        endpoints_sorted = sorted(all_endpoints, key=lambda item: (item[0], item[1]))
+        
+        # Set placeholder values for logging code compatibility
+        negotiation = {
+            "carrier_ip": carrier_rtp_ip,
+            "core_ip": core_rtp_ip,
+            "first_invite_source_ip": "manual",
+            "first_invite_destination_ip": "manual",
+            "last_negotiation_host_ip": "manual",
+            "first_invite_packet": None,
+            "last_packet_invite": None,
+        }
+        carrier_request_ip = carrier_rtp_ip
+        carrier_request_port = carrier_port_int
+        carrier_reply_ip = carrier_rtp_ip
+        carrier_reply_port = carrier_port_int
+        core_request_ip = core_rtp_ip
+        core_request_port = core_port_int
+        core_reply_ip = core_rtp_ip
+        core_reply_port = core_port_int
+        carrier_invite_packet = None
+        carrier_200ok_packet = None
+        core_invite_packet = None
+        core_200ok_packet = None
+        invite_cipher_packet = None
+        ok_200_cipher_packet = None
+        carrier_200ok_audio_proto = "RTP/SAVP" if encrypted_likely else "RTP/AVP"
+        crypto_warning = None
+        encrypted_expected = encrypted_likely
+        encrypted_reasons = ["manual mode - encryption based on provided keys"]
+        correlation_ctx = None
+        
+        # Save session context for manual mode
+        session.last_sip_pcap = upload_path
+        session.last_call_id = call.call_id
+        
+    else:
+        # AUTOMATIC CORRELATION MODE - Detect from SIP/SDP
+        log_lines.append("INFO: RTP request/reply media IP+ports are auto-detected from SIP INVITE/200 OK m=audio.")
+        log_lines.append(f"INFO: Direction: {direction}")
+        log_lines.append(f"INFO: Analysis packet={analysis_packet}")
 
     with correlation_context(call_cid):
         LOGGER.info(
@@ -1627,18 +1782,18 @@ async def correlate(
             core_reply_port=core_reply_port,
         )
 
-    # Save context for later steps.
-    session.last_sip_pcap = upload_path
-    session.last_call_id = call.call_id
+        # Save context for later steps.
+        session.last_sip_pcap = upload_path
+        session.last_call_id = call.call_id
 
-    # Identify media endpoints in the uploaded SIP pcap (offer/answer typically yields 2/4/6/... endpoints).
-    all_endpoints = {(m.connection_ip, m.port) for m in call.media_sections if m.connection_ip and m.port}
-    endpoints_sorted = sorted(all_endpoints, key=lambda item: (item[0], item[1]))
+        # Identify media endpoints in the uploaded SIP pcap (offer/answer typically yields 2/4/6/... endpoints).
+        all_endpoints = {(m.connection_ip, m.port) for m in call.media_sections if m.connection_ip and m.port}
+        endpoints_sorted = sorted(all_endpoints, key=lambda item: (item[0], item[1]))
 
-    encrypted_likely = any(
-        ("SAVP" in (m.protocol or "")) or m.sdes_cryptos or m.dtls_fingerprints
-        for m in call.media_sections
-    )
+        encrypted_likely = any(
+            ("SAVP" in (m.protocol or "")) or m.sdes_cryptos or m.dtls_fingerprints
+            for m in call.media_sections
+        )
 
     # Build per-stream extraction and final outputs in one shot (auto-detect decrypt mode).
     if parsed.warnings:
@@ -2661,6 +2816,40 @@ def _resolve_negotiation_context(call: SipCall, direction: str) -> Dict[str, Any
 
 
 def _match_200_ok_for_invite(call: SipCall, invite: SipMessage) -> SipMessage | None:
+    """Find 183 Session Progress or 200 OK response matching an INVITE.
+    Priority: 183 with SDP > 200 OK.
+    """
+    # Try 183 Session Progress with SDP first (priority)
+    candidates_183 = [
+        m
+        for m in call.messages
+        if (not m.is_request)
+        and m.status_code == 183
+        and m.src_ip == invite.dst_ip
+        and m.dst_ip == invite.src_ip
+        and m.ts >= invite.ts
+        and (m.ts - invite.ts) <= 180.0
+        and m.has_sdp
+        and _first_audio_port(m) is not None
+    ]
+    candidates_183.sort(key=lambda m: m.ts)
+    
+    # Try exact match for 183
+    exact_183: List[SipMessage] = []
+    for m in candidates_183:
+        if invite.cseq_num is not None and m.cseq_num is not None and invite.cseq_num != m.cseq_num:
+            continue
+        if invite.cseq_method and m.cseq_method and invite.cseq_method != m.cseq_method:
+            continue
+        if invite.via_branch and m.via_branch and invite.via_branch != m.via_branch:
+            continue
+        exact_183.append(m)
+    if exact_183:
+        return exact_183[0]
+    if candidates_183:
+        return candidates_183[0]
+    
+    # Fallback to 200 OK
     candidates = [
         m
         for m in call.messages
@@ -2691,8 +2880,8 @@ def _match_200_ok_for_invite(call: SipCall, invite: SipMessage) -> SipMessage | 
 
 def _next_200ok_same_route_with_audio(call: SipCall, ok: SipMessage) -> SipMessage | None:
     """
-    If the selected 200 OK doesn't contain usable m=audio port, try the next 200 OK
-    from the same source to the same destination that does.
+    If the selected response doesn't contain usable m=audio port, try the next response
+    (183 or 200) from the same source to the same destination that does.
     """
     if ok is None:
         return None
@@ -2700,7 +2889,7 @@ def _next_200ok_same_route_with_audio(call: SipCall, ok: SipMessage) -> SipMessa
         m
         for m in call.messages
         if (not m.is_request)
-        and m.status_code == 200
+        and m.status_code in (183, 200)
         and m.src_ip == ok.src_ip
         and m.dst_ip == ok.dst_ip
         and m.ts > ok.ts
@@ -2745,7 +2934,7 @@ def _select_invite_and_ok_for_direction(call: SipCall, negotiation: Dict[str, An
 
     ok = _match_200_ok_for_invite(call, invite)
     if ok is None:
-        raise ValueError("Could not find 200 OK matching selected INVITE")
+        raise ValueError("Could not find 183/200 OK response matching selected INVITE")
     if _first_audio_port(ok) is None:
         next_ok = _next_200ok_same_route_with_audio(call, ok)
         if next_ok is not None:
@@ -3142,7 +3331,7 @@ def _is_media_encrypted_expected(call: SipCall, direction: str, negotiation: Dic
 
 def _carrier_received_200ok_audio_proto(call: SipCall, negotiation: Dict[str, str]) -> str | None:
     """
-    Find an SDP protocol from m=audio in a 200 OK message received by carrier (dst_ip == carrier_ip).
+    Find an SDP protocol from m=audio in a 183/200 response received by carrier (dst_ip == carrier_ip).
     Returns protocol like RTP/AVP or RTP/SAVP when found.
     """
     carrier_ip = str(negotiation.get("carrier_ip") or "")
@@ -3151,7 +3340,7 @@ def _carrier_received_200ok_audio_proto(call: SipCall, negotiation: Dict[str, st
     candidates = [
         m
         for m in call.messages
-        if (not m.is_request) and m.status_code == 200 and m.dst_ip == carrier_ip and m.media_sections
+        if (not m.is_request) and m.status_code in (183, 200) and m.dst_ip == carrier_ip and m.media_sections
     ]
     candidates.sort(key=lambda m: m.ts)
     for msg in candidates:

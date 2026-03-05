@@ -1,0 +1,113 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Analyze SIP PCAP",
+			"type": "shell",
+			"command": "python temp_analyze_sip.py /Users/fdanielneto/Downloads/prd-eu-test2/20260304_095832/uploads/noetica-in-2leg.pcap",
+			"isBackground": false
+		},
+		{
+			"label": "Analyze SIP PCAP with venv",
+			"type": "shell",
+			"command": "/Users/fdanielneto/Documents/github/rtp-capture-tool/.venv/bin/python temp_analyze_sip.py /Users/fdanielneto/Downloads/prd-eu-test2/20260304_095832/uploads/noetica-in-2leg.pcap",
+			"isBackground": false
+		},
+		{
+			"label": "Test New Correlation Logic",
+			"type": "shell",
+			"command": "/Users/fdanielneto/Documents/github/rtp-capture-tool/.venv/bin/python scripts/test_new_correlation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test New Correlation Logic - Retry",
+			"type": "shell",
+			"command": "/Users/fdanielneto/Documents/github/rtp-capture-tool/.venv/bin/python scripts/test_new_correlation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test New Correlation Logic - Final",
+			"type": "shell",
+			"command": "/Users/fdanielneto/Documents/github/rtp-capture-tool/.venv/bin/python scripts/test_new_correlation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test Correlation Debug",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_correlation_debug.py",
+			"isBackground": false
+		},
+		{
+			"label": "Analyze INVITE Propagation",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/analyze_invite_propagation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Analyze INVITE Propagation Chain",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/analyze_invite_propagation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Analyze INVITE Propagation - Fixed",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/analyze_invite_propagation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Run Debug Outbound Core",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/debug_outbound_core.py",
+			"isBackground": false
+		},
+		{
+			"label": "Run Debug Outbound Core",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/debug_outbound_core.py",
+			"isBackground": false
+		},
+		{
+			"label": "Run Debug Outbound Core",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/debug_outbound_core.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test Find Response Direct",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_find_response_direct.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test Find Response Direct",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_find_response_direct.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test Find Response Direct Final",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_find_response_direct.py",
+			"isBackground": false
+		},
+		{
+			"label": "Test Find Response Direct Complete",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_find_response_direct.py",
+			"isBackground": false
+		},
+		{
+			"label": "Run Correlation Test with Debug",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_new_correlation.py",
+			"isBackground": false
+		},
+		{
+			"label": "Run Final Correlation Test",
+			"type": "shell",
+			"command": ".venv/bin/python scripts/test_new_correlation.py",
+			"isBackground": false
+		}
+	]
+}

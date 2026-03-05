@@ -1,0 +1,18 @@
+name: generic_inbound
+description: Generic inbound correlation (fallback)
+priority: 10
+enabled: true
+
+detection:
+  direction: inbound
+  # No specific requirements - acts as fallback
+
+correlation:
+  strategy: generic
+  force_direction: inbound
+  annotations:
+    - "Correlator: GenericCorrelator (Inbound)"
+  
+  notes: |
+    Generic fallback for inbound calls that don't match specific use cases.
+    Uses the original correlation logic.
