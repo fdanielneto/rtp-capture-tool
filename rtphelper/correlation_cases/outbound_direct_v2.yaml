@@ -1,0 +1,85 @@
+# Outbound Direct Media (New Modular Architecture)
+# ==================================================
+# Outbound calls with direct media path where Core media endpoint is RTP Engine
+# (XCC/SBC SDP rewrite may be absent)
+#
+# Topology: Core/RTP Engine ←→ Carrier (direct RTP/SRTP)
+# Strategy: direct_topology (2-hop)
+# Template: direct_2legs (2 filters)
+# ==================================================
+
+name: outbound_direct_v2
+description: "Outbound direct topology with RTP Engine as core media endpoint"
+priority: 10
+enabled: true
+
+# Detection Rules
+# --------------------------------------------------
+# Define WHEN this use case applies
+detection:
+  direction: outbound
+  rules:
+    - type: direction_match
+      direction: outbound
+      description: "Outbound call detection"
+
+# Correlation Configuration
+# --------------------------------------------------
+# NEW: Use modular strategy from YAML file
+correlation:
+  strategy: direct_topology  # ← References correlation_strategies/direct_topology.yaml
+  force_direction: outbound
+  
+  # Optional: Override strategy defaults
+  overrides: {}
+  
+  # Multi Call-ID configuration
+  multi_call_id: false  # Single Call-ID only
+  
+  # Annotations
+  annotations:
+    - "Correlator: ConfigurableCorrelator (Modular Architecture)"
+    - "Strategy: direct_topology (2-hop)"
+    - "Features: Direct media, Single Call-ID, RTP Engine present"
+  
+  # Notes
+  notes: |
+    Outbound calls with direct media path (2-leg topology).
+    
+    Call Flow:
+    - Core/RTP Engine → Carrier (direct RTP/SRTP)
+    - RTP Engine is still present as media endpoint
+    - XCC/SBC SDP rewrite may or may not be present
+    - Single Call-ID throughout
+    
+    Media Path:
+    - Core/RTP Engine sends RTP directly to Carrier
+    - Carrier sends RTP directly to Core/RTP Engine public SDP IP
+    
+    Use Cases:
+    - Outbound to PSTN with direct routing
+    - Direct topology without XCC rewrite
+    - Simple outbound scenarios
+
+# Filter Configuration
+# --------------------------------------------------
+# NEW: Use modular template from YAML file
+filters:
+  template: direct_2legs  # ← References filter_templates/direct_2legs.yaml
+  use_default_templates: false  # Use YAML template instead
+  custom_templates_enabled: false
+  
+  notes: |
+    Uses filter template "direct_2legs" from YAML file.
+    
+    Generated filters:
+    - Step 1: Core → Carrier (RTP from core)
+    - Step 2: Carrier → Core (RTP return path)
+
+# Metadata
+# --------------------------------------------------
+metadata:
+  version: "2.0.0"
+  architecture: "modular"
+  created: "2026-03-05"
+  migrated_from: "outbound_no_xcc"

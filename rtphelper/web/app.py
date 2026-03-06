@@ -2034,9 +2034,9 @@ async def correlate(
     log_lines.append(f"INFO: Media capture files available: {len(media_pcaps)}")
     
     if rtpengine_ip_per_instance:
-        log_lines.append("INFO: Using per-instance host IPs from config for RTP filters")
+        log_lines.append("INFO: RTP filter IP policy: combined Phase 1 uses RTP Engine public SDP IP; per-leg rtpengine_* uses per-instance private host IP")
     else:
-        log_lines.append("INFO: Using SDP-announced IP for RTP filters")
+        log_lines.append("INFO: RTP filter IP policy: using RTP Engine public SDP IP (no per-instance private host IP mapping available)")
 
     step_results: List[Dict[str, object]] = []
     combined_dir = session.base_dir / "combined"

@@ -1,7 +1,7 @@
 # Outbound calls with direct media (no RTP Engine / XCC)
 name: outbound_no_xcc
 description: "Outbound calls with direct media path (no RTP Engine cross-connect)"
-priority: 60
+priority: 5
 enabled: true
 
 detection:

@@ -1,7 +1,7 @@
 name: inbound_no_rtp_engine-fallback
 description: Inbound calls without RTP Engine (direct Carrier → Core)
-priority: 42
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: inbound

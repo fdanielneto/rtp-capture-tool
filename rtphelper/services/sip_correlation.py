@@ -23,6 +23,23 @@ from rtphelper.services.correlation_case_loader import (
     reload_cases,
 )
 
+# Import strategy and template loaders (new modular architecture)
+try:
+    from rtphelper.services.correlation_strategy_loader import (
+        CorrelationStrategyLoader,
+        CorrelationStrategy as StrategyConfig,
+        get_strategy as get_strategy_config,
+    )
+    from rtphelper.services.filter_template_loader import (
+        FilterTemplateLoader,  
+        FilterTemplate,
+        get_template as get_filter_template,
+    )
+    MODULAR_ARCHITECTURE_AVAILABLE = True
+except ImportError:
+    LOGGER.warning("Modular architecture (strategy/template loaders) not available, using legacy config")
+    MODULAR_ARCHITECTURE_AVAILABLE = False
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -105,7 +122,7 @@ class CorrelationStrategy(ABC):
         pass
 
 
-def identify_use_case(call: SipCall, direction: str) -> str:
+def identify_use_case(call: SipCall, direction: str, num_call_ids: int = 1) -> str:
     """
     Identify the correlation use case based on SIP headers and direction.
     
@@ -115,6 +132,7 @@ def identify_use_case(call: SipCall, direction: str) -> str:
     Args:
         call: The merged SipCall
         direction: "inbound" or "outbound"
+        num_call_ids: Number of Call-IDs in the correlation group
         
     Returns:
         Use case identifier string (case name from matching YAML config)
@@ -123,7 +141,7 @@ def identify_use_case(call: SipCall, direction: str) -> str:
     cases = loader.get_cases()
     
     for case in cases:
-        if _matches_case(call, direction, case):
+        if _matches_case(call, direction, case, num_call_ids):
             LOGGER.debug(f"Matched correlation case: {case.name} (priority={case.priority})")
             return case.name
     
@@ -132,7 +150,7 @@ def identify_use_case(call: SipCall, direction: str) -> str:
     return "unknown"
 
 
-def _matches_case(call: SipCall, direction: str, case: CorrelationCase) -> bool:
+def _matches_case(call: SipCall, direction: str, case: CorrelationCase, num_call_ids: int = 1) -> bool:
     """
     Check if a call matches a correlation case's detection rules.
     
@@ -140,6 +158,7 @@ def _matches_case(call: SipCall, direction: str, case: CorrelationCase) -> bool:
         call: The SipCall to check
         direction: Call direction
         case: CorrelationCase with detection rules
+        num_call_ids: Number of Call-IDs in the correlation group
         
     Returns:
         True if the call matches this case
@@ -149,6 +168,24 @@ def _matches_case(call: SipCall, direction: str, case: CorrelationCase) -> bool:
     # Check direction
     if detection.direction != "both":
         if detection.direction != direction:
+            return False
+    
+    # Check multi_call_id compatibility (NEW: protection against wrong use case)
+    if case.correlation.multi_call_id is not None:
+        has_multiple_call_ids = num_call_ids > 1
+        
+        if case.correlation.multi_call_id and not has_multiple_call_ids:
+            # Use case expects multiple Call-IDs, but only 1 exists → reject
+            LOGGER.debug(
+                f"Skipping {case.name}: expects multi_call_id=true but only {num_call_ids} Call-ID(s) found"
+            )
+            return False
+        
+        if not case.correlation.multi_call_id and has_multiple_call_ids:
+            # Use case expects single Call-ID, but multiple exist → reject
+            LOGGER.debug(
+                f"Skipping {case.name}: expects multi_call_id=false but {num_call_ids} Call-ID(s) found"
+            )
             return False
     
     # Check method (if specified)
@@ -408,6 +445,15 @@ class ConfigurableCorrelator(CorrelationStrategy):
     """
     Configurable correlation strategy that uses YAML config for behavior.
     
+    Supports TWO modes:
+    1. NEW: Strategy from YAML file (modular architecture)
+       - correlation.strategy: "direct_topology" or "rtp_engine_topology"
+       - Loads strategy from rtphelper/correlation_strategies/
+    
+    2. LEGACY: Inline config (backward compatibility)
+       - correlation.strategy: "configurable"
+       - correlation.config: { ... inline config ... }
+    
     Supports customizing:
     - IP extraction rules (carrier_ip_source, core_ip_source)
     - Response finding strategy (response_priority, fallback methods)
@@ -416,12 +462,35 @@ class ConfigurableCorrelator(CorrelationStrategy):
     """
     
     def __init__(self, case: 'CorrelationCase'):
-        """Initialize with correlation case config."""
+        """
+        Initialize with correlation case config.
+        
+        Tries to load strategy from YAML file first (new modular architecture),
+        then falls back to inline config (legacy mode).
+        """
         self.case = case
         self.config = case.correlation.config
+        self.strategy_config: Optional['StrategyConfig'] = None
         
-        if not self.config:
-            raise ValueError(f"ConfigurableCorrelator requires correlation.config for case {case.name}")
+        # Try to load strategy from YAML file (new modular architecture)
+        if MODULAR_ARCHITECTURE_AVAILABLE and case.correlation.strategy != "configurable":
+            strategy_name = case.correlation.strategy
+            try:
+                self.strategy_config = get_strategy_config(strategy_name)
+                if self.strategy_config:
+                    LOGGER.info(f"✅ Loaded strategy '{strategy_name}' for case '{case.name}'")
+                else:
+                    LOGGER.warning(
+                        f"Strategy '{strategy_name}' not found in YAML files, "
+                        f"falling back to inline config for case '{case.name}'"
+                    )
+            except Exception as e:
+                LOGGER.error(f"Failed to load strategy '{strategy_name}': {e}, using inline config")
+                self.strategy_config = None
+        
+        # Fallback to inline config (legacy mode)
+        if not self.strategy_config and not self.config:
+            raise ValueError(f"ConfigurableCorrelator requires correlation.config or valid strategy for case {case.name}")
     
     def correlate(
         self,
@@ -450,25 +519,69 @@ class ConfigurableCorrelator(CorrelationStrategy):
             ctx.log_lines.append(annotation)
         
         # Multi Call-ID grouping (if enabled)
-        if self.config.group_multi_call_ids and len(all_call_ids) > 1:
+        # Check case config first (NEW), then inline config (LEGACY)
+        multi_call_id_enabled = False
+        if self.case.correlation.multi_call_id is not None:
+            multi_call_id_enabled = self.case.correlation.multi_call_id
+        elif self.config:
+            multi_call_id_enabled = self.config.group_multi_call_ids
+        
+        if multi_call_id_enabled and len(all_call_ids) > 1:
             ctx.log_lines.append(f"INFO: Processing {len(all_call_ids)} related Call-IDs")
+            ctx.log_lines.append("INFO: Multiple Call-IDs detected - assuming SBC is present in signaling path")
         
         # RTP Engine detection
-        if self.config.rtp_engine_detection == "enabled":
+        rtp_engine_enabled = False
+        if self.strategy_config:
+            rtp_engine_enabled = self.strategy_config.rtp_engine_detection.enabled
+        elif self.config:
+            rtp_engine_enabled = self.config.rtp_engine_detection == "enabled"
+        
+        if rtp_engine_enabled:
             ctx.rtp_engine = detect_rtp_engine(call, actual_direction)
             if ctx.rtp_engine.detected:
                 ctx.log_lines.append(
-                    f"INFO: RTP Engine detected - XCC IP: {ctx.rtp_engine.xcc_ip}, "
-                    f"Announced IP: {ctx.rtp_engine.changed_sdp_ip}"
+                    f"INFO: RTP Engine SDP announcement detected - signaling node: {ctx.rtp_engine.xcc_ip}, "
+                    f"RTP Engine public SDP IP: {ctx.rtp_engine.changed_sdp_ip}"
                 )
-        elif self.config.rtp_engine_detection == "optional":
+        elif self.config and self.config.rtp_engine_detection == "optional":
             ctx.rtp_engine = detect_rtp_engine(call, actual_direction)
             # Don't fail if not detected
         # else: disabled - skip detection
         
         # Extract IPs using configured sources
-        carrier_ip = self._extract_ip(call, self.config.carrier_ip_source, actual_direction, ctx)
-        core_ip = self._extract_ip(call, self.config.core_ip_source, actual_direction, ctx)
+        # NEW: Use strategy config if available
+        selected_core_key = "core"
+        if self.strategy_config:
+            carrier_ip_source = self.strategy_config.get_ip_source("carrier", actual_direction)
+            core_ip_source = self.strategy_config.get_ip_source("core", actual_direction)
+            if not core_ip_source:
+                # Some strategies (e.g. inbound_single_cid) model core-side endpoint as rtpengine.
+                core_ip_source = self.strategy_config.get_ip_source("rtpengine", actual_direction)
+                if core_ip_source:
+                    selected_core_key = "rtpengine"
+        else:
+            # LEGACY: Use inline config
+            carrier_ip_source = self.config.carrier_ip_source if self.config else None
+            core_ip_source = self.config.core_ip_source if self.config else None
+        
+        carrier_ip = self._extract_ip(call, carrier_ip_source, actual_direction, ctx)
+        core_ip = self._extract_ip(call, core_ip_source, actual_direction, ctx)
+
+        # Strategy fallback support (e.g. source: target_host.resolved_ip with fallback: last_invite.dst_ip)
+        if self.strategy_config:
+            carrier_cfg = self.strategy_config.ip_extraction.get("carrier")
+            core_cfg = self.strategy_config.ip_extraction.get(selected_core_key)
+
+            if not carrier_ip and carrier_cfg and carrier_cfg.fallback_source:
+                carrier_ip = self._extract_ip(call, carrier_cfg.fallback_source, actual_direction, ctx)
+                if carrier_ip:
+                    ctx.log_lines.append(f"INFO: Carrier IP extracted using fallback source: {carrier_cfg.fallback_source}")
+
+            if not core_ip and core_cfg and core_cfg.fallback_source:
+                core_ip = self._extract_ip(call, core_cfg.fallback_source, actual_direction, ctx)
+                if core_ip:
+                    ctx.log_lines.append(f"INFO: Core IP extracted using fallback source: {core_cfg.fallback_source}")
         
         if not carrier_ip or not core_ip:
             ctx.log_lines.append("ERROR: Failed to extract carrier or core IP")
@@ -517,6 +630,15 @@ class ConfigurableCorrelator(CorrelationStrategy):
             return None
         
         parts = source.split('.')
+
+        # Strategy placeholder for host-resolution outside SIP context.
+        # In CLI/check scripts we don't have selected target host context here,
+        # so caller should rely on configured fallback source.
+        if parts[0] == "target_host" and len(parts) >= 2 and parts[1] == "resolved_ip":
+            ctx.log_lines.append(
+                "INFO: Source target_host.resolved_ip requires host context; using strategy fallback if configured"
+            )
+            return None
         
         # Get INVITE messages
         invites = [msg for msg in call.messages if msg.method == "INVITE"]
@@ -528,8 +650,14 @@ class ConfigurableCorrelator(CorrelationStrategy):
         # Sort by timestamp
         invites.sort(key=lambda m: m.ts)
         
-        # Filter out re-INVITEs if configured
-        if self.config.filter_reinvites:
+        # Filter re-INVITEs if configured
+        filter_reinvites = (
+            self.strategy_config.reinvite_filtering.enabled
+            if self.strategy_config
+            else (self.config.filter_reinvites if self.config else True)
+        )
+        
+        if filter_reinvites:
             initial_invites = [inv for inv in invites if not inv.to_tag]
             if initial_invites:
                 invites = initial_invites
@@ -606,7 +734,13 @@ class ConfigurableCorrelator(CorrelationStrategy):
         invites.sort(key=lambda m: m.ts)
         
         # Filter re-INVITEs if configured
-        if self.config.filter_reinvites:
+        filter_reinvites = (
+            self.strategy_config.reinvite_filtering.enabled
+            if self.strategy_config
+            else (self.config.filter_reinvites if self.config else True)
+        )
+        
+        if filter_reinvites:
             initial_invites = [inv for inv in invites if not inv.to_tag]
             if initial_invites:
                 invites = initial_invites
@@ -676,7 +810,13 @@ class ConfigurableCorrelator(CorrelationStrategy):
         Returns:
             SipMessage (response) or None
         """
-        for status_code in self.config.response_priority:
+        # Get response priority from strategy config or inline config
+        if self.strategy_config:
+            response_priority = self.strategy_config.response_finding.response_priority
+        else:
+            response_priority = self.config.response_priority if self.config else [183, 200]
+        
+        for status_code in response_priority:
             if status_code == 183:
                 response = _find_183_progress_with_sdp_for_invite(call, invite)
                 if response:
@@ -689,11 +829,22 @@ class ConfigurableCorrelator(CorrelationStrategy):
                     return response
         
         # Fallback methods if configured
-        if self.config.enable_hop_fallback:
+        enable_hop_fallback = (
+            self.strategy_config.response_finding.enable_hop_fallback 
+            if self.strategy_config 
+            else (self.config.enable_hop_fallback if self.config else False)
+        )
+        enable_adjacent_packet_search = (
+            self.strategy_config.response_finding.enable_adjacent_packet_search
+            if self.strategy_config
+            else (self.config.enable_adjacent_packet_search if self.config else False)
+        )
+        
+        if enable_hop_fallback:
             ctx.log_lines.append("INFO: Attempting hop-based fallback for response")
             # This would need more complex logic - for now just log
         
-        if self.config.enable_adjacent_packet_search:
+        if enable_adjacent_packet_search:
             ctx.log_lines.append("INFO: Adjacent packet search enabled")
             # This would need more complex logic - for now just log
         
@@ -728,6 +879,10 @@ def _get_correlator_for_case(case_name: str) -> CorrelationStrategy:
     
     for case in cases:
         if case.name == case_name:
+            # Modular strategy cases (e.g. inbound_single_cid, direct_topology, rtp_engine_topology)
+            # must use ConfigurableCorrelator so strategy YAML is loaded.
+            if case.correlation.strategy not in {"generic", "configurable"}:
+                return ConfigurableCorrelator(case)
             # Check if case has configurable correlation behavior
             if case.correlation.config and case.correlation.strategy == "configurable":
                 return ConfigurableCorrelator(case)
@@ -1704,6 +1859,8 @@ def build_filter_variables(
     Returns:
         Dictionary of template variables
     """
+    public_rtpengine_ip = ctx.rtp_engine.changed_sdp_ip if ctx.rtp_engine else ""
+    private_rtpengine_ip = rtpengine_actual_ip or ""
     variables = {
         "direction": ctx.direction,
         "for_count": for_count,
@@ -1711,8 +1868,12 @@ def build_filter_variables(
         "core": {},
         "rtpengine": {
             "detected": ctx.rtp_engine.detected if ctx.rtp_engine else False,
-            "detected_ip": rtpengine_actual_ip or "",
-            "announced_ip": ctx.rtp_engine.changed_sdp_ip if ctx.rtp_engine else "",
+            "detected_ip": private_rtpengine_ip,
+            "announced_ip": public_rtpengine_ip,
+            "public_ip": public_rtpengine_ip,
+            "private_ip": private_rtpengine_ip,
+            # Combined (Phase 1) uses public SDP IP, per-leg (Phase 2) uses private resolved IP.
+            "resolved_ip": public_rtpengine_ip if for_count else (private_rtpengine_ip or public_rtpengine_ip),
         }
     }
     
@@ -1730,14 +1891,14 @@ def build_filter_variables(
             variables["carrier"]["source"] = {
                 "ip": leg.source_media.rtp_ip or "",
                 "port": leg.source_media.rtp_port or 0,
-                "rtcp_port": leg.source_media.rtcp_port or 0,
+                "rtcp_port": getattr(leg.source_media, "rtcp_port", 0) or 0,
             }
         
         if leg.destination_media:
             variables["carrier"]["destination"] = {
                 "ip": leg.destination_media.rtp_ip or "",
                 "port": leg.destination_media.rtp_port or 0,
-                "rtcp_port": leg.destination_media.rtcp_port or 0,
+                "rtcp_port": getattr(leg.destination_media, "rtcp_port", 0) or 0,
             }
     
     # Core leg variables
@@ -1754,19 +1915,21 @@ def build_filter_variables(
             variables["core"]["source"] = {
                 "ip": leg.source_media.rtp_ip or "",
                 "port": leg.source_media.rtp_port or 0,
-                "rtcp_port": leg.source_media.rtcp_port or 0,
+                "rtcp_port": getattr(leg.source_media, "rtcp_port", 0) or 0,
             }
         
         if leg.destination_media:
             variables["core"]["destination"] = {
                 "ip": leg.destination_media.rtp_ip or "",
                 "port": leg.destination_media.rtp_port or 0,
-                "rtcp_port": leg.destination_media.rtcp_port or 0,
+                "rtcp_port": getattr(leg.destination_media, "rtcp_port", 0) or 0,
             }
     
     # Helper function for RTP Engine IP selection
     def get_rtpengine_ip_for_filter(sdp_ip: str) -> str:
-        """Returns the actual RTP Engine IP if available, otherwise SDP IP."""
+        """Return RTP Engine IP based on phase: public SDP for combined, private resolved for per-leg."""
+        if for_count:
+            return sdp_ip
         if (rtpengine_actual_ip 
             and ctx.rtp_engine and ctx.rtp_engine.detected 
             and ctx.rtp_engine.changed_sdp_ip 
@@ -1784,6 +1947,32 @@ def build_filter_variables(
         variables["core"]["rtpengine_ip"] = get_rtpengine_ip_for_filter(
             ctx.core_leg.destination_media.rtp_ip or ""
         )
+
+    # RTP Engine port aliases for templates that model the RTP Engine as endpoint.
+    # Canonical mapping: rtpengine.source.port == core.source.port
+    core_source_port = None
+    if isinstance(variables.get("core"), dict):
+        core_source = variables["core"].get("source", {})
+        if isinstance(core_source, dict):
+            core_source_port = core_source.get("port")
+
+    carrier_destination_port = None
+    if isinstance(variables.get("carrier"), dict):
+        carrier_destination = variables["carrier"].get("destination", {})
+        if isinstance(carrier_destination, dict):
+            carrier_destination_port = carrier_destination.get("port")
+
+    carrier_source_port = None
+    if isinstance(variables.get("carrier"), dict):
+        carrier_source = variables["carrier"].get("source", {})
+        if isinstance(carrier_source, dict):
+            carrier_source_port = carrier_source.get("port")
+
+    rtpengine_source_port = core_source_port or carrier_destination_port or carrier_source_port or 0
+    variables.setdefault("rtpengine", {})
+    variables["rtpengine"]["source"] = {
+        "port": rtpengine_source_port,
+    }
     
     return variables
 
@@ -1861,6 +2050,29 @@ def get_builtin_template_set(template_set_name: str) -> List[Dict[str, Any]]:
                 "phase2_template": """ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}""",
                 "required_fields": ["core.destination.ip", "core.destination.port"]
             }
+        ],
+        
+        # Single Call-ID topology - RTP Engine as media termination
+        # Uses resolved private IP of RTP Engine from hosts.yaml
+        "inbound_single_cid": [
+            {
+                "step": 1,
+                "leg_name": "carrier->rtpengine",
+                "leg_key": "leg_carrier_rtpengine",
+                "description": "RTP from carrier to RTP Engine",
+                "phase1_template": """ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port} && ip.dst==${rtpengine.public_ip}""",
+                "phase2_template": """ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port} && ip.dst==${rtpengine.resolved_ip}""",
+                "required_fields": ["carrier.source.ip", "carrier.source.port", "rtpengine.resolved_ip"]
+            },
+            {
+                "step": 2,
+                "leg_name": "rtpengine->carrier",
+                "leg_key": "leg_rtpengine_carrier",
+                "description": "RTP from RTP Engine to carrier",
+                "phase1_template": """ip.src==${rtpengine.public_ip} && ip.dst==${carrier.source.ip} && udp.dstport==${carrier.source.port}""",
+                "phase2_template": """ip.src==${rtpengine.resolved_ip} && ip.dst==${carrier.source.ip} && udp.dstport==${carrier.source.port}""",
+                "required_fields": ["carrier.source.ip", "carrier.source.port", "rtpengine.resolved_ip"]
+            }
         ]
     }
     
@@ -1878,12 +2090,13 @@ def build_tshark_filters_from_template(
     Build tshark filters from template configuration.
     
     Uses template rendering engine to generate filter expressions from:
-    - Built-in template sets (rtp_engine_topology, direct_topology)
+    - NEW: YAML filter templates (modular architecture)
+    - LEGACY: Built-in template sets (rtp_engine_topology, direct_topology)
     - Custom templates from YAML config
     
     Args:
         ctx: Correlation context with leg information
-        template_set_name: Name of built-in template set ("rtp_engine_topology", "direct_topology")
+        template_set_name: Name of template ("rtp_engine_4legs", "direct_2legs", etc)
         rtpengine_actual_ip: Actual RTP Engine IP detected from PCAP
         for_count: Whether this is Phase 1 (count) or Phase 2 (extract)
         custom_templates: Optional list of custom template dictionaries
@@ -1896,11 +2109,43 @@ def build_tshark_filters_from_template(
     # Build variable dictionary for template rendering
     variables = build_filter_variables(ctx, rtpengine_actual_ip, for_count)
     
-    # Get templates (custom or built-in)
+    # Get templates (priority order: custom > YAML file > built-in)
+    templates = None
+    template_source = "unknown"
+    
+    # 1. Custom templates (highest priority)
     if custom_templates:
         templates = custom_templates
-    else:
+        template_source = "custom"
+    
+    # 2. Try to load from YAML file (new modular architecture)
+    elif MODULAR_ARCHITECTURE_AVAILABLE:
+        try:
+            filter_template = get_filter_template(template_set_name)
+            if filter_template:
+                # Convert FilterStep objects to dict format
+                templates = []
+                for step in filter_template.steps:
+                    templates.append({
+                        "step": step.step,
+                        "leg_name": step.leg_name,
+                        "leg_key": step.leg_key,
+                        "description": step.description,
+                        "phase1_template": step.phase1_template,
+                        "phase2_template": step.phase2_template,
+                        "required_fields": step.required_fields
+                    })
+                template_source = f"YAML file ({filter_template.file_path.name})"
+                LOGGER.info(f"✅ Using filter template '{template_set_name}' from {template_source}")
+        except Exception as e:
+            LOGGER.warning(f"Failed to load filter template '{template_set_name}' from YAML: {e}")
+    
+    # 3. Fallback to built-in templates (legacy)
+    if not templates:
         templates = get_builtin_template_set(template_set_name)
+        if templates:
+            template_source = "built-in"
+            LOGGER.info(f"Using built-in template set '{template_set_name}'")
     
     if not templates:
         LOGGER.warning(f"No templates found for template set: {template_set_name}")
@@ -2327,7 +2572,7 @@ def correlate_sip_call(
     
     # Identify use case if not provided
     if use_case is None:
-        use_case = identify_use_case(merged_call, direction)
+        use_case = identify_use_case(merged_call, direction, num_call_ids=len(target_group))
         LOGGER.debug(f"Auto-detected use case: {use_case}")
     
     # Get appropriate correlation strategy (dynamic or hardcoded)

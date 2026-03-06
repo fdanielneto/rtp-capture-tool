@@ -1,7 +1,7 @@
 name: outbound_pstn_carrier
 description: Outbound PSTN Carrier calls
-priority: 40
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: outbound

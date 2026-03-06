@@ -1,7 +1,7 @@
 name: generic_outbound
 description: Generic outbound correlation (fallback)
-priority: 10
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: outbound

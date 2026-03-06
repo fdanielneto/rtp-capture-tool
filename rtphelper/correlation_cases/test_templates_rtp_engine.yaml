@@ -1,7 +1,7 @@
 # Test case for filter template system - RTP Engine topology
 name: test_templates_rtp_engine
 description: "Test case demonstrating filter template system with RTP Engine (4-leg topology)"
-priority: 100
+priority: 5
 enabled: true
 
 detection:

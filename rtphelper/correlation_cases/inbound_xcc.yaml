@@ -1,8 +1,8 @@
 # Inbound calls with RTP Engine (XCC cross-connect)
 name: inbound_xcc
 description: "Inbound calls with RTP Engine media proxy (XCC cross-connect)"
-priority: 70
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: inbound

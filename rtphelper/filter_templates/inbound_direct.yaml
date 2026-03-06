@@ -1,0 +1,172 @@
+# Direct Media Filter Template (2 Streams)
+# ==================================================
+# Filter template for direct media topology (2-hop)
+# RTP Engine remains present as core-side media endpoint
+#
+# Topology:
+#   Carrier ←→ Core/RTP Engine (direct RTP/SRTP)
+#
+# Filters:
+#   - Step 1: Carrier → Core (RTP from carrier)
+#   - Step 2: Core → Carrier (RTP return path)
+# ==================================================
+
+name: inbound_direct
+description: "2-stream filter template for direct media topology"
+version: "1.0.0"
+topology: inbound_direct_topology
+legs: 2
+
+# Filter Steps
+# --------------------------------------------------
+# Each step defines a tshark filter for one RTP leg
+steps:
+  - step: 1
+    leg_name: "carrier->core"
+    leg_key: "leg_carrier_core"
+    description: "RTP from carrier to core (direct media)"
+    
+    # Phase 1 template (pre-filter count phase)
+    phase1_template: |
+      ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+    
+    # Phase 2 template (per-leg extraction phase, same as phase1 for direct media)
+    phase2_template: |
+      ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+    
+    # Required fields for this filter
+    required_fields:
+      - carrier.source.ip
+      - carrier.source.port
+    
+    # Field descriptions
+    field_descriptions:
+      carrier.source.ip: "Carrier RTP source IP"
+      carrier.source.port: "Carrier RTP source port"
+    
+    # Notes
+    notes: |
+      Captures RTP packets from carrier to core.
+      
+      Filter logic:
+      - Source IP matches carrier RTP IP
+      - Source port matches carrier RTP port
+      - Direction: Carrier → Core
+      
+      Use case:
+      - Captures carrier's outgoing RTP stream
+      - Bidirectional flow (leg 1 of 2)
+
+  - step: 2
+    leg_name: "core->carrier"
+    leg_key: "leg_core_carrier"
+    description: "RTP from core to carrier (direct media)"
+    
+    # Phase 1 template (pre-filter count phase)
+    phase1_template: |
+      ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}
+    
+    # Phase 2 template (per-leg extraction phase, same as phase1 for direct media)
+    phase2_template: |
+      ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}
+    
+    # Required fields for this filter
+    required_fields:
+      - core.destination.ip
+      - core.destination.port
+    
+    # Field descriptions
+    field_descriptions:
+      core.destination.ip: "Core RTP destination IP"
+      core.destination.port: "Core RTP destination port"
+    
+    # Notes
+    notes: |
+      Captures RTP packets from core to carrier.
+      
+      Filter logic:
+      - Source IP matches core RTP IP
+      - Source port matches core RTP port
+      - Direction: Core → Carrier
+      
+      Use case:
+      - Captures core's outgoing RTP stream
+      - Bidirectional flow (leg 2 of 2)
+
+# Overall Template Metadata
+# --------------------------------------------------
+metadata:
+  total_legs: 2
+  topology_type: direct_media
+  media_path: "Carrier ←→ Core (direct)"
+  
+  phases:
+    - phase: 1
+      name: "Direct Media"
+      description: "Carrier ←→ Core bidirectional RTP"
+      legs: [1, 2]
+
+# Required Fields Summary
+# --------------------------------------------------
+required_fields_summary:
+  - carrier.source.ip
+  - carrier.source.port
+  - core.destination.ip
+  - core.destination.port
+
+# Field Extraction Sources
+# --------------------------------------------------
+field_sources:
+  carrier.source.ip: "From carrier RTP endpoint in SIP response SDP"
+  carrier.source.port: "From carrier RTP endpoint in SIP response SDP"
+  core.destination.ip: "From core RTP endpoint in SIP response SDP"
+  core.destination.port: "From core RTP endpoint in SIP response SDP"
+
+# Validation Rules
+# --------------------------------------------------
+validation:
+  minimum_fields_required: 4
+  required_fields:
+    - carrier.source.ip
+    - carrier.source.port
+    - core.destination.ip
+    - core.destination.port
+  
+  field_types:
+    carrier.source.ip: ipv4_address
+    carrier.source.port: udp_port
+    core.destination.ip: ipv4_address
+    core.destination.port: udp_port
+
+# Annotations
+# --------------------------------------------------
+annotations:
+  - "Template: Direct 2-Leg Topology"
+  - "Legs: 2 (bidirectional)"
+  - "Topology: Carrier ←→ Core"
+  - "Media: Direct RTP/SRTP"
+
+# Notes
+# --------------------------------------------------
+notes: |
+  Direct media filter template for 2-leg topology.
+  
+  Topology:
+  - Carrier sends RTP to Core/RTP Engine public SDP IP
+  - Core/RTP Engine sends RTP to Carrier
+  - XCC SDP rewrite may be absent
+  
+  Filter Generation:
+  - Step 1: Captures Carrier → Core RTP
+  - Step 2: Captures Core → Carrier RTP
+  
+  Phase Handling:
+  - Phase 1 is used for packet counting (combined pre-filtering)
+  - Phase 2 is used for per-leg extraction
+  - For direct media, phase templates are intentionally identical
+  
+  Use Cases:
+  - WebRTC direct media
+  - Carrier direct routing
+  - Test/dev environments
+  - RTP Engine as core-side endpoint without XCC rewrite

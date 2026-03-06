@@ -1,0 +1,88 @@
+# Inbound RTP Engine (New Modular Architecture)
+# ==================================================
+# Inbound calls with RTP Engine media proxy (3-hop topology)
+#
+# Topology: Carrier ←→ RTP Engine ←→ Core
+# Strategy: rtp_engine_topology (3-hop)
+# Template: rtp_engine_4legs (4 filters)
+# ==================================================
+
+name: inbound_multiple_cid
+description: "Inbound calls with RTP Engine media proxy"
+priority: 80
+enabled: true
+
+# Detection Rules
+# --------------------------------------------------
+# Define WHEN this use case applies
+detection:
+  direction: inbound
+  rules:
+    - type: direction_match
+      direction: inbound
+      description: "Inbound call detection"
+
+# Correlation Configuration
+# --------------------------------------------------
+# NEW: Use modular strategy from YAML file
+correlation:
+  strategy: rtp_engine_topology  # ← References correlation_strategies/rtp_engine_topology.yaml
+  force_direction: inbound
+  
+  # Optional: Override strategy defaults
+  overrides: {}
+  
+  # Multi Call-ID configuration
+  multi_call_id: true  # Single Call-ID only
+  
+  # Annotations
+  annotations:
+    - "Correlator: ConfigurableCorrelator (Modular Architecture)"
+    - "Strategy: rtp_engine_topology (3-hop)"
+    - "Features: RTP Engine detection, Single Call-ID"
+  
+  # Notes
+  notes: |
+    Inbound calls with RTP Engine in media path (4-leg topology).
+    
+    Call Flow:
+    - Phase 1: Carrier → RTP Engine (INVITE, carrier RTP endpoints)
+    - Phase 2: RTP Engine → Core (re-INVITE, RTP Engine endpoints)
+    
+    Media Path:
+    - Carrier ←→ RTP Engine ←→ Core
+    - 4 RTP flows (bidirectional on each leg)
+    
+    RTP Engine Detection:
+    - Detects SDP c= line changes between INVITEs
+    - Identifies RTP Engine IP from modified SDP
+    
+    Use Cases:
+    - PSTN carrier inbound with transcoding
+    - Inbound with SRTP encryption/decryption
+    - Carrier with codec translation
+
+# Filter Configuration
+# --------------------------------------------------
+# NEW: Use modular template from YAML file
+filters:
+  template: rtp_engine_4legs  # ← References filter_templates/rtp_engine_4legs.yaml
+  use_default_templates: false  # Use YAML template instead
+  custom_templates_enabled: false
+  
+  notes: |
+    Uses filter template "rtp_engine_4legs" from YAML file.
+    
+    Generated filters:
+    - Step 1 (Phase 1): Carrier → RTP Engine
+    - Step 2 (Phase 1): RTP Engine → Carrier
+    - Step 3 (Phase 2): RTP Engine → Core
+    - Step 4 (Phase 2): Core → RTP Engine
+
+# Metadata
+# --------------------------------------------------
+metadata:
+  version: "2.0.0"
+  architecture: "modular"
+  created: "2026-03-05"
+  migrated_from: "inbound_xcc"

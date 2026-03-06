@@ -1,8 +1,8 @@
 # Inbound calls with direct media (no RTP Engine / XCC)
 name: inbound_no_xcc
 description: "Inbound calls with direct media path (no RTP Engine cross-connect)"
-priority: 60
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: inbound
@@ -21,7 +21,7 @@ correlation:
     core_ip_source: last_invite.dst_ip
     
     # Response priority
-    response_priority: [200]
+    response_priority: [183,200]
     enable_hop_fallback: true
     enable_adjacent_packet_search: true
     

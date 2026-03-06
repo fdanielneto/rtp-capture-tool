@@ -1,7 +1,7 @@
 name: inbound_with_rtp_engine-fallback
 description: Inbound calls with RTP Engine detected (Carrier → RTP Engine → Core)
-priority: 45
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: inbound

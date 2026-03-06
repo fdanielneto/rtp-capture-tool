@@ -1,6 +1,6 @@
 name: test_configurable_inbound
 description: Test case using ConfigurableCorrelator with custom IP extraction
-priority: 98
+priority: 5
 enabled: true  # Enable for testing
 
 detection:

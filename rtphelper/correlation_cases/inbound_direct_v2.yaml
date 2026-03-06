@@ -1,0 +1,86 @@
+# Inbound Direct Media (New Modular Architecture)
+# ==================================================
+# Inbound calls with direct media path where Core media endpoint is RTP Engine
+# (XCC/SBC SDP rewrite may be absent)
+#
+# Topology: Carrier ←→ Core/RTP Engine (direct RTP/SRTP)
+# Strategy: inbound_direct_topology (2-hop)
+# Template: inbound_direct (2 filters)
+# ==================================================
+
+name: inbound_direct_v2
+description: "Inbound direct topology with RTP Engine as core media endpoint"
+priority: 10
+enabled: true
+
+# Detection Rules
+# --------------------------------------------------
+# Define WHEN this use case applies
+detection:
+  direction: inbound
+  rules:
+    - type: direction_match
+      direction: inbound
+      description: "Inbound call detection"
+
+
+# Correlation Configuration
+# --------------------------------------------------
+# NEW: Use modular strategy from YAML file
+correlation:
+  strategy: inbound_direct_topology  # ← References correlation_strategies/inbound_direct_topology.yaml
+  force_direction: inbound
+  
+  # Optional: Override strategy defaults
+  overrides: {}
+  
+  # Multi Call-ID configuration
+  multi_call_id: false  # Single Call-ID only
+  
+  # Annotations
+  annotations:
+    - "Correlator: ConfigurableCorrelator (Modular Architecture)"
+    - "Strategy: inbound_direct_topology (2-hop)"
+    - "Features: Direct media, Single Call-ID, RTP Engine present"
+  
+  # Notes
+  notes: |
+    Inbound calls with direct media path (2-leg topology).
+    
+    Call Flow:
+    - Carrier → Core/RTP Engine (direct RTP/SRTP)
+    - RTP Engine is still present as media endpoint
+    - XCC/SBC SDP rewrite may or may not be present
+    - Single Call-ID throughout
+    
+    Media Path:
+    - Carrier sends RTP directly to Core/RTP Engine public SDP IP
+    - Core/RTP Engine sends RTP directly to Carrier
+    
+    Use Cases:
+    - WebRTC direct media
+    - Carrier direct routing
+    - Direct topology without XCC rewrite
+
+# Filter Configuration
+# --------------------------------------------------
+# NEW: Use modular template from YAML file
+filters:
+  template: inbound_direct  # ← References filter_templates/inbound_direct.yaml
+  use_default_templates: false  # Use YAML template instead
+  custom_templates_enabled: false
+  
+  notes: |
+    Uses filter template "inbound_direct" from YAML file.
+    
+    Generated filters:
+    - Step 1: Carrier → Core (RTP from carrier)
+    - Step 2: Core → Carrier (RTP return path)
+
+# Metadata
+# --------------------------------------------------
+metadata:
+  version: "2.0.0"
+  architecture: "modular"
+  created: "2026-03-05"
+  migrated_from: "inbound_no_xcc"

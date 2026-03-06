@@ -1,6 +1,6 @@
 name: xcc_fallback_blocked-fallback
 description: XCC/B2BUA IP blocking for response fallback
-priority: 80
+priority: 5
 enabled: true
 
 detection:

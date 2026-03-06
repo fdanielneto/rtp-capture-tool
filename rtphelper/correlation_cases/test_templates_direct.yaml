@@ -1,7 +1,7 @@
 # Test case for filter template system - Direct media topology
 name: test_templates_direct
 description: "Test case demonstrating filter template system with direct media (2-leg topology)"
-priority: 100
+priority: 5
 enabled: true
 
 detection:
@@ -39,7 +39,7 @@ notes: |
   ## Filter Template System - Direct Media
   
   This case uses the built-in "direct_topology" template set for scenarios
-  without RTP Engine (direct media path).
+  where RTP Engine is the core-side endpoint and XCC rewrite may be absent.
   
   ### Template Variables:
   - ${carrier.source.ip}, ${carrier.source.port}

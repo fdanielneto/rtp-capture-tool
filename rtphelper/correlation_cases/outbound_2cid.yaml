@@ -1,8 +1,8 @@
 # Outbound calls with multiple Call-IDs and RTP Engine
 name: outbound_2cid
 description: "Outbound calls with multiple Call-IDs (B2BUA) and RTP Engine"
-priority: 80
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: outbound

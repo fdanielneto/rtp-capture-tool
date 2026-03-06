@@ -1,7 +1,7 @@
 name: inbound_pstn_carrier
 description: Inbound PSTN Carrier calls with Diversion or P-Asserted-Identity headers
-priority: 50
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: inbound

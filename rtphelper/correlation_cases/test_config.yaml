@@ -1,6 +1,6 @@
 name: test_configurable_case
 description: Test case with full correlation and filters configuration
-priority: 99
+priority: 5
 enabled: false  # Disabled so it doesn't interfere with production
 
 detection:

@@ -1,0 +1,241 @@
+# RTP Engine Topology Correlation Strategy (3-Hop)
+# ==================================================
+# For calls with RTP Engine media proxy in the path
+# Detects RTP Engine via SDP changes (XCC cross-connect)
+#
+# Topology:
+#   Carrier ←→ RTP Engine ←→ Core
+#
+# Use cases:
+#   - PSTN carrier inbound with transcoding
+#   - Inbound/outbound with SRTP encryption/decryption
+#   - Carrier with codec translation
+#   - B2BUA scenarios
+# ==================================================
+
+name: rtp_engine_topology
+description: "RTP Engine media proxy correlation (3-hop topology)"
+version: "1.0.0"
+topology_type: rtp_engine_media_proxy
+hops: 3
+
+# IP Extraction Configuration
+# --------------------------------------------------
+# Defines HOW to extract carrier, RTP Engine, and core IPs from SIP messages
+ip_extraction:
+  carrier:
+    source: first_invite.src_ip
+    description: "Carrier IP from first INVITE source"
+    auto_detect_direction: true
+    
+  core:
+    source: last_invite.dst_ip
+    description: "Core IP from last INVITE destination"
+    auto_detect_direction: true
+  
+  rtp_engine:
+    source: invite_with_changed_sdp.src_ip
+    description: "RTP Engine IP detected via SDP c= line changes"
+    detection_method: sdp_change_analysis
+    auto_detect_direction: true
+
+# Response Finding Configuration
+# --------------------------------------------------
+# Defines HOW to find SIP responses for media extraction
+response_finding:
+  response_priority: [183, 200]
+  enable_hop_fallback: true
+  enable_adjacent_packet_search: true
+  block_xcc_responses: true
+  
+  description: |
+    Response priority:
+    - 183: Session Progress (early media, preferred)
+    - 200: OK (answer, fallback)
+    
+    XCC Response Blocking:
+    - Block responses from RTP Engine cross-connect phase
+    - Only use responses from final topology
+    
+    Fallback logic:
+    1. Try to find 183 response (early media)
+    2. If not found, try 200 response (answer)
+    3. Enable adjacent packet search for better matching
+
+# Media Extraction Configuration
+# --------------------------------------------------
+# Defines HOW to extract RTP endpoints from SDP
+media_extraction:
+  mode: sdp_from_responses_with_rtp_engine
+  extract_from:
+    - message_type: response
+      response_codes: [183, 200]
+      extract: [carrier_rtp, rtp_engine_carrier_side_rtp, rtp_engine_core_side_rtp, core_rtp]
+  
+  phases:
+    - phase: 1
+      name: "Carrier ←→ RTP Engine"
+      description: "Extract carrier and RTP Engine carrier-side endpoints"
+      endpoints:
+        - carrier_rtp
+        - rtp_engine_carrier_side_rtp
+    
+    - phase: 2
+      name: "RTP Engine ←→ Core"
+      description: "Extract RTP Engine core-side and core endpoints"
+      endpoints:
+        - rtp_engine_core_side_rtp
+        - core_rtp
+  
+  description: |
+    Extract RTP endpoints from SIP responses in 2 phases:
+    
+    Phase 1 (First INVITE/response):
+    - Carrier RTP: From response to carrier
+    - RTP Engine (carrier side): From RTP Engine SDP offer
+    
+    Phase 2 (Re-INVITE after XCC):
+    - RTP Engine (core side): From RTP Engine SDP offer
+    - Core RTP: From response to core
+
+# Topology Configuration
+# --------------------------------------------------
+# Defines the call topology structure
+topology:
+  legs: 4
+  description: "4-leg RTP Engine topology (3-hop)"
+  
+  phases:
+    - phase: 1
+      name: "Carrier ←→ RTP Engine"
+      description: "First hop: carrier media through RTP Engine"
+      legs:
+        - leg: 1
+          name: "Carrier → RTP Engine"
+          direction: carrier_to_rtp_engine
+          
+        - leg: 2
+          name: "RTP Engine → Carrier"
+          direction: rtp_engine_to_carrier
+    
+    - phase: 2
+      name: "RTP Engine ←→ Core"
+      description: "Second hop: RTP Engine media to core"
+      legs:
+        - leg: 3
+          name: "RTP Engine → Core"
+          direction: rtp_engine_to_core
+          
+        - leg: 4
+          name: "Core → RTP Engine"
+          direction: core_to_rtp_engine
+
+# RTP Engine / Media Proxy Configuration
+# --------------------------------------------------
+# ENABLED for RTP Engine topology
+rtp_engine_detection:
+  enabled: true
+  detection_method: sdp_change_analysis
+  xcc_ip_source: invite_with_changed_sdp.src_ip
+  
+  description: |
+    RTP Engine Detection via SDP Changes:
+    
+    1. First INVITE: Carrier sends INVITE with carrier SDP
+    2. RTP Engine modifies SDP (c= line changed to RTP Engine IP)
+    3. Re-INVITE (XCC): RTP Engine sends re-INVITE to core with RTP Engine SDP
+    4. Detection: Compare SDP c= lines to identify RTP Engine IP
+    
+    XCC (Cross-Connect):
+    - RTP Engine cross-connects media between carrier and core
+    - Creates 2 RTP bridges: Carrier ←→ RTP Engine ←→ Core
+
+# Re-INVITE Handling
+# --------------------------------------------------
+reinvite_filtering:
+  enabled: true
+  description: "Filter Re-INVITEs to avoid duplicate correlation (except XCC re-INVITE)"
+
+# Validation Rules
+# --------------------------------------------------
+# Defines validation rules for this strategy
+validation:
+  required_ips:
+    - carrier
+    - rtp_engine
+    - core
+  
+  required_rtp_endpoints:
+    - carrier_rtp
+    - rtp_engine_carrier_side_rtp
+    - rtp_engine_core_side_rtp
+    - core_rtp
+  
+  minimum_packets: 20
+  description: "Carrier, RTP Engine, Core IPs and all 4 RTP endpoints required"
+
+# Overridable Fields
+# --------------------------------------------------
+# These fields can be overridden in use cases
+overridable:
+  - response_priority
+  - enable_hop_fallback
+  - enable_adjacent_packet_search
+  - block_xcc_responses
+  - reinvite_filtering.enabled
+  - validation.minimum_packets
+  - rtp_engine_detection.enabled
+
+# Backward Compatibility
+# --------------------------------------------------
+# Legacy field mappings for backward compatibility
+legacy_mapping:
+  carrier_ip_source: ip_extraction.carrier.source
+  core_ip_source: ip_extraction.core.source
+  xcc_ip_source: ip_extraction.rtp_engine.source
+  response_priority: response_finding.response_priority
+  enable_hop_fallback: response_finding.enable_hop_fallback
+  enable_adjacent_packet_search: response_finding.enable_adjacent_packet_search
+  block_xcc_responses: response_finding.block_xcc_responses
+  filter_reinvites: reinvite_filtering.enabled
+  rtp_engine_detection: rtp_engine_detection.enabled
+
+# Annotations
+# --------------------------------------------------
+annotations:
+  - "Strategy: RTP Engine Topology (3-hop)"
+  - "Topology: Carrier ←→ RTP Engine ←→ Core"
+  - "Media: RTP Engine media proxy"
+  - "Legs: 4 (bidirectional on each hop)"
+  - "Detection: SDP c= line changes"
+
+# Notes
+# --------------------------------------------------
+notes: |
+  RTP Engine topology strategy for calls with RTP Engine media proxy.
+  
+  Call Flow:
+  1. Carrier sends INVITE to RTP Engine
+  2. RTP Engine modifies SDP (replaces c= line with RTP Engine IP)
+  3. RTP Engine sends re-INVITE to Core (XCC cross-connect)
+  4. Core responds (183/200) with SDP
+  5. RTP flows: Carrier ←→ RTP Engine ←→ Core
+  
+  Media Path:
+  - Phase 1: Carrier ←→ RTP Engine (bidirectional)
+  - Phase 2: RTP Engine ←→ Core (bidirectional)
+  - Total: 4 RTP flows
+  
+  RTP Engine Functions:
+  - Transcoding (codec translation)
+  - SRTP encryption/decryption
+  - DTLS termination
+  - Media recording/monitoring
+  - NAT traversal
+  
+  Use this strategy when:
+  - RTP Engine in media path
+  - SDP c= line changes detected
+  - B2BUA with media proxy
+  - PSTN/carrier with transcoding
+  - SRTP encryption required

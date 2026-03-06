@@ -1,0 +1,160 @@
+# Single Call-ID Filter Template (2 Streams)
+# ==============================================================
+# Filter template for single Call-ID topology (2-hop)
+# RTP Engine is the media termination point
+#
+# Topology:
+#   Carrier ←→ RTP Engine (bidirectional RTP)
+#
+# ** IMPORTANT NOTE **
+# In this topology, the RTP Engine IS the media termination.
+# The filter uses the resolved **private IP** of the RTP Engine
+# obtained via DNS lookup from hosts.yaml.
+#
+# Filters:
+#   - Step 1: Carrier → RTP Engine (RTP from carrier)
+#   - Step 2: RTP Engine → Carrier (RTP return path)
+# ==============================================================
+
+name: inbound_single_cid
+description: "2-stream filter template for single Call-ID topology (RTP Engine termination)"
+version: "1.0.0"
+topology: inbound_single_cid
+legs: 2
+
+# Filter Steps
+# --------------------------------------------------
+# Each step defines a tshark filter for one RTP leg
+steps:
+  - step: 1
+    leg_name: "carrier->rtpengine"
+    leg_key: "leg_carrier_rtpengine"
+    description: "RTP from carrier to RTP Engine"
+    
+    # Phase 1 template (pre-filter count phase)
+    # Combined filter MUST use RTP Engine public SDP IP
+    phase1_template: |
+      ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+    
+    # Phase 2 template (per-leg extraction phase)
+    # Uses resolved RTP Engine IP from hosts.yaml
+    phase2_template: |
+      ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+    
+    # Required fields for this filter
+    required_fields:
+      - carrier.source.ip
+      - carrier.source.port
+    
+    # Field descriptions
+    field_descriptions:
+      carrier.source.ip: "Carrier RTP source IP (from SIP)"
+      carrier.source.port: "Carrier RTP source port (from SDP)"
+      rtpengine.resolved_ip: "RTP Engine private IP (resolved from hosts.yaml via DNS)"
+    
+    # Notes
+    notes: |
+      Captures RTP packets from carrier to RTP Engine.
+      
+      Filter logic:
+      - Source IP matches carrier RTP IP (from SIP)
+      - Source port matches carrier RTP port (from SDP)
+      - Destination IP is the resolved RTP Engine private IP
+      
+      IP Resolution:
+      - RTP Engine IP is resolved via DNS from hosts.yaml
+      - This is the private/internal IP, not SDP-announced IP
+      
+      Use case:
+      - Captures carrier's incoming RTP stream to RTP Engine
+
+
+  - step: 2
+    leg_name: "rtpengine->carrier"
+    leg_key: "leg_rtpengine_carrier"
+    description: "RTP from RTP Engine to carrier"
+    
+    # Phase 1 template (pre-filter count phase)
+    # Combined filter MUST use RTP Engine public SDP IP
+    phase1_template: |
+      ip.src==${rtpengine.public_ip} && udp.srcport==${core.destination.port}
+    
+    # Phase 2 template (per-leg extraction phase)
+    # Uses resolved RTP Engine IP from hosts.yaml
+    phase2_template: |
+      ip.src==${rtpengine.resolved_ip} && udp.srcport==${core.destination.port}
+    
+    # Required fields for this filter
+    required_fields:
+      - carrier.source.ip
+      - carrier.source.port
+      - rtpengine.resolved_ip
+      - core.destination.port
+    
+    # Field descriptions
+    field_descriptions:
+      carrier.source.ip: "Carrier RTP source IP (from SIP)"
+      carrier.source.port: "Carrier RTP source port (from SDP)"
+      rtpengine.resolved_ip: "RTP Engine private IP (resolved from hosts.yaml via DNS)"
+      core.destination.port: "Core RTP destination port (from SDP)"
+    # Notes
+    notes: |
+      Captures RTP packets from RTP Engine to carrier.
+      
+      Filter logic:
+      - Source IP is the resolved RTP Engine private IP
+      - Destination IP matches carrier RTP IP
+      - Destination port matches carrier RTP port
+      
+      IP Resolution:
+      - RTP Engine IP is resolved via DNS from hosts.yaml
+      - This is the private/internal IP, not SDP-announced IP
+      
+      Use case:
+      - Captures RTP Engine's outgoing RTP stream to carrier
+
+
+# Overall Template Metadata
+# --------------------------------------------------
+metadata:
+  total_legs: 2
+  topology_type: single_callid
+  
+  ip_resolution:
+    carrier: "From SIP/SDP extraction"
+    rtpengine: "From hosts.yaml via DNS resolution"
+  
+  notes: |
+    Single Call-ID Filter Template
+    ==============================
+    
+    Key difference from other topologies:
+    - RTP Engine IS the media termination (not "Core")
+    - RTP Engine IP is resolved from hosts.yaml via DNS
+    - Uses private/internal IP, not SDP-announced IP
+    
+    This ensures accurate capture when:
+    - SDP contains public/NAT IP addresses
+    - Actual RTP flows use private network IPs
+    - Capture happens on RTP Engine's private interface
+
+
+# Variable Reference
+# --------------------------------------------------
+# Variables available for filter rendering:
+variables:
+  carrier:
+    source:
+      ip: "Carrier's RTP source IP (from SIP)"
+      port: "Carrier's RTP source port (from SDP)"
+    destination:
+      ip: "Carrier's RTP destination IP (from response SDP)"
+      port: "Carrier's RTP destination port (from response SDP)"
+  
+  rtpengine:
+    resolved_ip: "RTP Engine private IP (DNS resolved from hosts.yaml)"
+    sdp_ip: "RTP Engine SDP-announced IP (may differ from resolved_ip)"
+    source:
+      port: "RTP Engine RTP source port (maps to core.source.port)"
+    
+  direction: "inbound"

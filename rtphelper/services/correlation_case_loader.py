@@ -62,6 +62,7 @@ class CorrelationConfig:
     """Correlation configuration for a use case."""
     strategy: str = "generic"  # "generic", "configurable", or class path
     force_direction: Optional[str] = None
+    multi_call_id: Optional[bool] = None  # True = multiple Call-IDs, False = single Call-ID
     annotations: List[str] = field(default_factory=list)
     notes: str = ""
     config: Optional[CorrelationBehaviorConfig] = None  # Runtime behavior config
@@ -216,6 +217,7 @@ class CorrelationCaseLoader:
         correlation = CorrelationConfig(
             strategy=correlation_data.get("strategy", "generic"),
             force_direction=correlation_data.get("force_direction"),
+            multi_call_id=correlation_data.get("multi_call_id"),  # NEW: Simple boolean format
             annotations=correlation_data.get("annotations", []),
             notes=correlation_data.get("notes", ""),
             config=behavior_config

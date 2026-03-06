@@ -1,7 +1,7 @@
 name: early_media_183-fallback
 description: Calls with 183 Session Progress (Early Media)
-priority: 70
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: both

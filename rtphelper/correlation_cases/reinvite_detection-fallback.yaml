@@ -1,7 +1,7 @@
 name: reinvite_detection-fallback
 description: Calls with re-INVITE (distinguishes from initial INVITE)
-priority: 68
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: both

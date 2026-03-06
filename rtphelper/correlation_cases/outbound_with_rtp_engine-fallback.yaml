@@ -1,7 +1,7 @@
 name: outbound_with_rtp_engine-fallback
 description: Outbound calls with RTP Engine detected (Core → RTP Engine → Carrier)
-priority: 44
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: outbound

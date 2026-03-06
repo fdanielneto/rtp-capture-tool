@@ -1,7 +1,7 @@
 name: incomplete_sdp-fallback
 description: Calls with incomplete SDP (fallback to adjacent packets)
-priority: 65
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: both

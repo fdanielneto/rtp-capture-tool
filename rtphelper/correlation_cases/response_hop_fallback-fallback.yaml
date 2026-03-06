@@ -1,7 +1,7 @@
 name: response_hop_fallback-fallback
 description: Fallback to find response at previous/next hop when direct response not found
-priority: 30
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: both

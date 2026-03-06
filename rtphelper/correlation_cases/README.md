@@ -61,7 +61,9 @@ filters:
       - step: 1
         leg_name: carrier->host
         leg_key: leg_carrier_rtpengine
+        # Phase 1 = packet counting / pre-filter stage
         phase1_template: "ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}"
+        # Phase 2 = per-leg extraction stage
         phase2_template: "ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}"
         required_fields: [carrier.source.ip, carrier.source.port]
 ```
@@ -114,7 +116,7 @@ The `filters` section allows customizing filter generation:
 
 **Custom Templates:**
 - Define custom filter expressions with variable substitution
-- Support for Phase 1 (count) and Phase 2 (extract) filtering
+- Support for Phase 1 (packet counting / pre-filter) and Phase 2 (per-leg extraction) filtering
 - Jinja2-style conditionals: `{% if direction == 'inbound' %}`
 
 See `configurable_example.yaml.example` for complete examples.

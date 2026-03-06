@@ -1,7 +1,7 @@
 name: multi_call_id_b2bua-fallback
 description: Calls with multiple Call-IDs (B2BUA with X-Talkdesk-Other-Leg-Call-Id)
-priority: 75
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: both

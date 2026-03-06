@@ -1,8 +1,8 @@
 # Outbound calls with RTP Engine (XCC cross-connect)
 name: outbound_xcc
 description: "Outbound calls with RTP Engine media proxy (XCC cross-connect)"
-priority: 70
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: outbound

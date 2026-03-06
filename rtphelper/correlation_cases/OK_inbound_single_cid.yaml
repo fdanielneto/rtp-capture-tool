@@ -1,0 +1,109 @@
+# Inbound Single Call-ID (1CID) - RTP Engine Media Termination
+# ==============================================================
+# Inbound calls with single Call-ID where media terminates at RTP Engine
+#
+# Topology: Carrier ←→ RTP Engine (media termination)
+# Strategy: inbound_single_cid (2-hop)
+# Template: inbound_single_cid (2 filters)
+#
+# NOTE: In this topology, what was historically called "Core" is actually
+# the RTP Engine. The RTP Engine acts as the media termination point,
+# receiving RTP from the carrier and handling media processing.
+#
+# The filter uses the **private IP of the RTP Engine** obtained via DNS
+# resolution from the hosts.yaml configuration file.
+# ==============================================================
+
+name: inbound_single_cid
+description: "Inbound single Call-ID - RTP Engine as media termination"
+priority: 15
+enabled: true
+
+# Detection Rules
+# --------------------------------------------------
+# Define WHEN this use case applies
+detection:
+  direction: inbound
+  rules:
+    - type: direction_match
+      direction: inbound
+      description: "Inbound call detection"
+
+
+# Correlation Configuration
+# --------------------------------------------------
+# Use modular strategy from YAML file
+correlation:
+  strategy: inbound_single_cid  # ← References correlation_strategies/inbound_single_cid.yaml
+  force_direction: inbound
+  
+  # Optional: Override strategy defaults
+  overrides: {}
+  
+  # Multi Call-ID configuration
+  multi_call_id: false  # Single Call-ID only
+  
+  # Annotations
+  annotations:
+    - "Correlator: ConfigurableCorrelator (Modular Architecture)"
+    - "Strategy: inbound_single_cid (2-hop)"
+    - "Features: Single Call-ID, RTP Engine media termination"
+    - "Note: 'Core' in this topology refers to the RTP Engine"
+  
+  # Notes
+  notes: |
+    Inbound calls with single Call-ID where RTP Engine is the media termination.
+    
+    ** IMPORTANT TERMINOLOGY **
+    In this topology, the entity historically called "Core" is actually 
+    the RTP Engine itself. The RTP Engine receives media directly from 
+    the carrier and handles media processing/termination.
+    
+    Call Flow:
+    - Carrier → RTP Engine (single INVITE, single Call-ID)
+    - No additional B2BUA or media proxy in path
+    
+    Media Path:
+    - Carrier sends RTP directly to RTP Engine
+    - RTP Engine sends RTP directly to Carrier
+    
+    Filter IP Resolution:
+    - RTP Engine IP is resolved via DNS lookup from hosts.yaml
+    - Uses the **private IP** of the RTP Engine (not SDP-announced IP)
+    
+    Use Cases:
+    - PSTN carrier inbound without XCC
+    - Direct carrier routing to RTP Engine
+    - Single-leg inbound calls
+
+
+# Filter Configuration
+# --------------------------------------------------
+# Use modular template from YAML file
+filters:
+  template: inbound_single_cid  # ← References filter_templates/inbound_single_cid.yaml
+  use_default_templates: false  # Use YAML template instead
+  custom_templates_enabled: false
+  
+  notes: |
+    Uses filter template "inbound_single_cid" from YAML file.
+    
+    IP Resolution:
+    - RTP Engine IP is resolved via DNS from hosts.yaml configuration
+    - This is the private/internal IP of the RTP Engine host
+    
+    Generated filters:
+    - Step 1: Carrier → RTP Engine (RTP from carrier)
+    - Step 2: RTP Engine → Carrier (RTP return path)
+
+
+# Metadata
+# --------------------------------------------------
+metadata:
+  version: "1.0.0"
+  architecture: "modular"
+  created: "2026-03-05"
+  notes: |
+    New use case created to clarify terminology:
+    - In single Call-ID scenarios, "Core" = RTP Engine
+    - Filter uses resolved private IP of RTP Engine from hosts.yaml

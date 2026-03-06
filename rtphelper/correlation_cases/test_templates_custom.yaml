@@ -1,7 +1,7 @@
 # Test case for custom filter templates
 name: test_templates_custom
 description: "Test case demonstrating custom filter templates with conditionals"
-priority: 999
+priority: 5
 enabled: true
 
 detection:

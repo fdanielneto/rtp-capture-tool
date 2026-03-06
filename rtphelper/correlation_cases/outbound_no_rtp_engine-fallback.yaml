@@ -1,7 +1,7 @@
 name: outbound_no_rtp_engine-fallback
 description: Outbound calls without RTP Engine (direct Core → Carrier)
-priority: 41
-enabled: true
+priority: 5
+enabled: false
 
 detection:
   direction: outbound
