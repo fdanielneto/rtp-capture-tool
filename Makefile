@@ -1,9 +1,15 @@
-.PHONY: install run-app run-worker start test e2e-tests e2e e2e_tests e2e-test bench-throughput load-test
+.PHONY: install run-app run-worker start test e2e-tests e2e e2e_tests e2e-test bench-throughput load-test clean
 
 install:
 	python -m pip install -e '.[dev]'
 
-run-app:
+clean:
+	@echo "🧹 Cleaning Python bytecode cache..."
+	@find rtphelper -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	@find rtphelper -type f -name "*.pyc" -delete 2>/dev/null || true
+	@echo "✅ Cache cleared"
+
+run-app: clean
 	RTPHELPER_EMBEDDED_WORKER=0 ./scripts/run.sh
 
 run-worker:
@@ -11,7 +17,7 @@ run-worker:
 	if [[ -x ".venv/bin/python" ]]; then PY=".venv/bin/python"; else PY="python3"; fi; \
 	$$PY scripts/run_correlation_worker.py'
 
-start:
+start: clean
 	@bash -c 'set -euo pipefail; \
 	if lsof -iTCP:8000 -sTCP:LISTEN -nP >/dev/null 2>&1; then \
 	  echo "Port 8000 is already in use. Stop existing app first."; \

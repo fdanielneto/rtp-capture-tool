@@ -1,0 +1,15 @@
+# Caso outbound multi Call-ID (4 legs, com XCC)
+name: outbound_multi_hop
+enabled: true
+priority: 80
+
+detection:
+  direction: outbound
+  multi_call_id: true
+
+correlation:
+  strategy: outbound_multi_hop
+  force_direction: outbound
+
+filters:
+  template: outbound_multi_hop

@@ -1,0 +1,15 @@
+# Caso inbound multi Call-ID (4 legs, com XCC)
+name: inbound_multi_hop
+enabled: true
+priority: 80
+
+detection:
+  direction: inbound
+  multi_call_id: true
+
+correlation:
+  strategy: inbound_multi_hop
+  force_direction: inbound
+
+filters:
+  template: inbound_multi_hop

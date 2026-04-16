@@ -348,5 +348,143 @@ class TestBuildCorrelationContext(unittest.TestCase):
         self.assertEqual(ctx.core_leg.source_ip, "2.2.2.2")  # Core IP
 
 
+class TestSpecificCorrelators(unittest.TestCase):
+    """Test Phase 2 specific correlators."""
+
+    def test_inbound_pstn_correlator_exists(self):
+        """Test that InboundPSTNCarrierCorrelator is available."""
+        from rtphelper.services.sip_correlation import (
+            InboundPSTNCarrierCorrelator,
+            CorrelationStrategy,
+        )
+        
+        correlator = InboundPSTNCarrierCorrelator()
+        self.assertIsInstance(correlator, CorrelationStrategy)
+        self.assertTrue(hasattr(correlator, "correlate"))
+
+    def test_outbound_pstn_correlator_exists(self):
+        """Test that OutboundPSTNCarrierCorrelator is available."""
+        from rtphelper.services.sip_correlation import (
+            OutboundPSTNCarrierCorrelator,
+            CorrelationStrategy,
+        )
+        
+        correlator = OutboundPSTNCarrierCorrelator()
+        self.assertIsInstance(correlator, CorrelationStrategy)
+        self.assertTrue(hasattr(correlator, "correlate"))
+
+    def test_use_case_handlers_registry(self):
+        """Test that USE_CASE_HANDLERS registry has specific correlators."""
+        from rtphelper.services.sip_correlation import (
+            USE_CASE_HANDLERS,
+            GenericCorrelator,
+            InboundPSTNCarrierCorrelator,
+            OutboundPSTNCarrierCorrelator,
+        )
+        
+        # Verify registry has expected keys
+        self.assertIn("unknown", USE_CASE_HANDLERS)
+        self.assertIn("inbound_pstn_carrier", USE_CASE_HANDLERS)
+        self.assertIn("outbound_pstn_carrier", USE_CASE_HANDLERS)
+        
+        # Verify handler types
+        self.assertIsInstance(USE_CASE_HANDLERS["unknown"], GenericCorrelator)
+        self.assertIsInstance(USE_CASE_HANDLERS["inbound_pstn_carrier"], InboundPSTNCarrierCorrelator)
+        self.assertIsInstance(USE_CASE_HANDLERS["outbound_pstn_carrier"], OutboundPSTNCarrierCorrelator)
+
+    def test_inbound_correlator_produces_context(self):
+        """Test that InboundPSTNCarrierCorrelator produces valid CorrelationContext."""
+        from rtphelper.services.sip_correlation import InboundPSTNCarrierCorrelator
+        
+        correlator = InboundPSTNCarrierCorrelator()
+        
+        # Create minimal mock call
+        call = MockSipCall(call_id="test-inbound")
+        call.messages = [
+            MockSipMessage(
+                packet_number=1,
+                ts=1.0,
+                src_ip="1.1.1.1",
+                dst_ip="2.2.2.2",
+                is_request=True,
+                method="INVITE",
+                call_id="test-inbound",
+                has_sdp=True,
+                media_sections=[MockMediaSection(connection_ip="1.1.1.1", port=5060)],
+            ),
+            MockSipMessage(
+                packet_number=2,
+                ts=2.0,
+                src_ip="2.2.2.2",
+                dst_ip="1.1.1.1",
+                is_request=False,
+                status_code=200,
+                cseq_method="INVITE",
+                call_id="test-inbound",
+                has_sdp=True,
+                media_sections=[MockMediaSection(connection_ip="2.2.2.2", port=5062)],
+            ),
+        ]
+        
+        ctx = correlator.correlate(call, "inbound", ["test-inbound"])
+        
+        # Verify basic context structure
+        self.assertEqual(ctx.direction, "inbound")
+        self.assertEqual(ctx.call_ids, ["test-inbound"])
+        
+        # Verify correlator annotation was added
+        self.assertTrue(
+            any("InboundPSTNCarrierCorrelator" in line for line in ctx.log_lines),
+            f"Expected correlator annotation in logs: {ctx.log_lines}"
+        )
+
+    def test_outbound_correlator_produces_context(self):
+        """Test that OutboundPSTNCarrierCorrelator produces valid CorrelationContext."""
+        from rtphelper.services.sip_correlation import OutboundPSTNCarrierCorrelator
+        
+        correlator = OutboundPSTNCarrierCorrelator()
+        
+        # Create minimal mock call
+        call = MockSipCall(call_id="test-outbound")
+        call.messages = [
+            MockSipMessage(
+                packet_number=1,
+                ts=1.0,
+                src_ip="2.2.2.2",
+                dst_ip="1.1.1.1",
+                is_request=True,
+                method="INVITE",
+                call_id="test-outbound",
+                has_sdp=True,
+                media_sections=[MockMediaSection(connection_ip="2.2.2.2", port=5060)],
+            ),
+            MockSipMessage(
+                packet_number=2,
+                ts=2.0,
+                src_ip="1.1.1.1",
+                dst_ip="2.2.2.2",
+                is_request=False,
+                status_code=200,
+                cseq_method="INVITE",
+                call_id="test-outbound",
+                has_sdp=True,
+                media_sections=[MockMediaSection(connection_ip="1.1.1.1", port=5062)],
+            ),
+        ]
+        
+        ctx = correlator.correlate(call, "outbound", ["test-outbound"])
+        
+        # Verify basic context structure
+        self.assertEqual(ctx.direction, "outbound")
+        self.assertEqual(ctx.call_ids, ["test-outbound"])
+        
+        # Verify correlator annotation was added
+        self.assertTrue(
+            any("OutboundPSTNCarrierCorrelator" in line for line in ctx.log_lines),
+            f"Expected correlator annotation in logs: {ctx.log_lines}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
+
