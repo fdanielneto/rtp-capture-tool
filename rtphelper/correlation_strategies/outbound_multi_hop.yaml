@@ -1,0 +1,112 @@
+# ==============================================================
+# For outbound calls with multiple Call-IDs where RTP Engine is media proxy
+#
+# Topology:
+#   Core ←→ RTP Engine ←→ Carrier (bidirectional RTP, 2 hops)
+# ==============================================================
+name: outbound_multi_hop
+description: "Outbound multi Call-ID - 4-leg topology (Core ↔ RTP Engine ↔ Carrier)"
+version: "1.0.0"
+topology_type: multi_callid
+hops: 3
+
+
+# IP Extraction Configuration
+# --------------------------------------------------
+# Defines HOW to extract core, carrier, and RTP Engine IPs from SIP messages
+ip_extraction:
+  core:
+    source: first_invite.src_ip
+    description: "Core IP from first INVITE source (outbound)"
+  carrier:
+    source: last_invite.dst_ip
+    description: "Carrier IP from last INVITE destination (outbound)"
+  rtp_engine:
+    source: invite_with_changed_sdp.src_ip
+    description: "RTP Engine IP detected via SDP c= line changes"
+    detection_method: sdp_change_analysis
+
+
+# Response Finding Configuration
+# --------------------------------------------------
+# Defines HOW to find SIP responses for media extraction
+response_finding:
+  response_priority: [183, 200]
+  enable_hop_fallback: true
+  enable_adjacent_packet_search: true
+  block_xcc_responses: true
+
+
+# Media Extraction Configuration
+# --------------------------------------------------
+# Defines HOW to extract RTP endpoints from SDP
+media_extraction:
+  mode: sdp_from_responses_with_rtp_engine
+  extract_from:
+    - message_type: response
+      response_codes: [183, 200]
+      extract: [carrier_rtp, rtp_engine_carrier_side_rtp, rtp_engine_core_side_rtp, core_rtp]
+  phases:
+    - phase: 1
+      name: "Core ↔ RTP Engine"
+      endpoints: [core_rtp, rtp_engine_core_side_rtp]
+    - phase: 2
+      name: "RTP Engine ↔ Carrier"
+      endpoints: [rtp_engine_carrier_side_rtp, carrier_rtp]
+
+
+# Topology Configuration
+# --------------------------------------------------
+# Defines the call topology structure
+topology:
+  legs: 4
+  description: "4-leg multi Call-ID - Core ↔ RTP Engine ↔ Carrier"
+  phases:
+    - phase: 1
+      name: "Core ↔ RTP Engine"
+      legs:
+        - leg: 1
+          name: "Core → RTP Engine"
+          direction: core_to_rtp_engine
+        - leg: 2
+          name: "RTP Engine → Core"
+          direction: rtp_engine_to_core
+    - phase: 2
+      name: "RTP Engine ↔ Carrier"
+      legs:
+        - leg: 3
+          name: "RTP Engine → Carrier"
+          direction: rtp_engine_to_carrier
+        - leg: 4
+          name: "Carrier → RTP Engine"
+          direction: carrier_to_rtp_engine
+
+
+# RTP Engine / Media Proxy Configuration
+# --------------------------------------------------
+# ENABLED - detects RTP Engine via SDP c= line changes (XCC cross-connect)
+rtp_engine_detection:
+  enabled: true
+  detection_method: sdp_change_analysis
+  xcc_ip_source: invite_with_changed_sdp.src_ip
+
+
+# Re-INVITE Handling
+# --------------------------------------------------
+reinvite_filtering:
+  enabled: true
+
+
+# Validation Rules
+# --------------------------------------------------
+validation:
+  required_ips:
+    - carrier
+    - rtp_engine
+    - core
+  required_rtp_endpoints:
+    - carrier_rtp
+    - rtp_engine_carrier_side_rtp
+    - rtp_engine_core_side_rtp
+    - core_rtp
+  minimum_packets: 20

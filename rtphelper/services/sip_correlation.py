@@ -87,6 +87,9 @@ class CorrelationContext:
     rtp_engine: RtpEngineInfo = field(default_factory=RtpEngineInfo)
     legs: List[LegInfo] = field(default_factory=list)
     log_lines: List[str] = field(default_factory=list)
+    use_case: Optional[str] = None
+    filter_template_name: Optional[str] = None
+    expected_legs: Optional[int] = None
 
 
 # ==============================================================================
@@ -1949,7 +1952,13 @@ def build_filter_variables(
         )
 
     # RTP Engine port aliases for templates that model the RTP Engine as endpoint.
-    # Canonical mapping: rtpengine.source.port == core.source.port
+    # Canonical mapping: rtpengine.source.port == core.destination.port
+    core_destination_port = None
+    if isinstance(variables.get("core"), dict):
+        core_destination = variables["core"].get("destination", {})
+        if isinstance(core_destination, dict):
+            core_destination_port = core_destination.get("port")
+
     core_source_port = None
     if isinstance(variables.get("core"), dict):
         core_source = variables["core"].get("source", {})
@@ -1968,7 +1977,7 @@ def build_filter_variables(
         if isinstance(carrier_source, dict):
             carrier_source_port = carrier_source.get("port")
 
-    rtpengine_source_port = core_source_port or carrier_destination_port or carrier_source_port or 0
+    rtpengine_source_port = core_destination_port or core_source_port or carrier_destination_port or carrier_source_port or 0
     variables.setdefault("rtpengine", {})
     variables["rtpengine"]["source"] = {
         "port": rtpengine_source_port,
@@ -2232,6 +2241,21 @@ def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[
     - reason: why unavailable (if not available)
     """
     filters: List[Dict[str, Any]] = []
+
+    # Prefer use-case template filters to keep leg count aligned with selected case.
+    template_name = (getattr(ctx, "filter_template_name", None) or "").strip()
+    if template_name:
+        template_filters = build_tshark_filters_from_template(
+            ctx=ctx,
+            template_set_name=template_name,
+            rtpengine_actual_ip=rtpengine_actual_ip,
+            for_count=for_count,
+        )
+        if template_filters:
+            expected_legs = getattr(ctx, "expected_legs", None)
+            if isinstance(expected_legs, int) and expected_legs > 0:
+                template_filters = sorted(template_filters, key=lambda item: int(item.get("step") or 0))[:expected_legs]
+            return template_filters
     
     if not ctx.carrier_leg or not ctx.core_leg:
         return filters
@@ -2444,6 +2468,10 @@ def build_tshark_filters(ctx: CorrelationContext, rtpengine_actual_ip: Optional[
             "reason": "missing core leg media",
         })
     
+    expected_legs = getattr(ctx, "expected_legs", None)
+    if isinstance(expected_legs, int) and expected_legs > 0:
+        filters = sorted(filters, key=lambda item: int(item.get("step") or 0))[:expected_legs]
+
     return filters
 
 
@@ -2581,8 +2609,40 @@ def correlate_sip_call(
     # Build correlation context using strategy
     all_call_ids = sorted(target_group)
     ctx = handler.correlate(merged_call, direction, all_call_ids)
-    
-    # Add use case to context for debugging
+
+    # Attach selected case metadata so filter builder respects per-use-case leg count.
+    ctx.use_case = use_case
+    selected_case = None
+    try:
+        selected_case = next((c for c in get_loader().get_cases() if c.name == use_case), None)
+        if selected_case and selected_case.filters and selected_case.filters.template_set:
+            ctx.filter_template_name = selected_case.filters.template_set
+            if MODULAR_ARCHITECTURE_AVAILABLE:
+                filter_template = get_filter_template(selected_case.filters.template_set)
+            else:
+                filter_template = None
+            if filter_template:
+                ctx.expected_legs = int(filter_template.legs)
+            else:
+                builtin_steps = get_builtin_template_set(selected_case.filters.template_set)
+                if builtin_steps:
+                    ctx.expected_legs = len(builtin_steps)
+    except Exception as exc:
+        LOGGER.debug(
+            "Failed to resolve template metadata for use_case=%s: %s",
+            use_case,
+            exc,
+            extra={"category": "SIP_CORRELATION"},
+        )
+
+    # Add use case, strategy and filter template to context for debugging.
+    # insert(0, ...) in reverse desired order so final list reads top-to-bottom:
+    #   Use Case: ...  →  Correlation Strategy: ...  →  Filter Template: ...
+    if selected_case:
+        template_name = (selected_case.filters.template_set if selected_case.filters else None) or "none"
+        strategy_name = selected_case.correlation.strategy or "none"
+        ctx.log_lines.insert(0, f"Filter Template: {template_name}")
+        ctx.log_lines.insert(0, f"Correlation Strategy: {strategy_name}")
     ctx.log_lines.insert(0, f"Use Case: {use_case}")
     
     return ctx, merged_call

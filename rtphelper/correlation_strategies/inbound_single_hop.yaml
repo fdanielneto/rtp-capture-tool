@@ -1,0 +1,78 @@
+# ==============================================================
+# For inbound calls with single Call-ID where RTP Engine is media termination
+#
+# Topology:
+#   Carrier ←→ RTP Engine (bidirectional RTP)
+# ==============================================================
+name: inbound_single_hop
+description: "Inbound single Call-ID - 2-leg topology (Carrier ↔ RTP Engine)"
+version: "1.0.0"
+topology_type: single_callid
+hops: 2
+
+
+# IP Extraction Configuration
+# --------------------------------------------------
+# Defines HOW to extract carrier and RTP Engine IPs from SIP messages
+ip_extraction:
+  carrier:
+    source: first_invite.src_ip
+    description: "Carrier IP from first INVITE source (inbound)"
+  rtpengine:
+    source: target_host.resolved_ip
+    description: "RTP Engine private IP resolved from hosts.yaml"
+    fallback: last_invite.dst_ip
+
+
+# Response Finding Configuration
+# --------------------------------------------------
+# Defines HOW to find SIP responses for media extraction
+response_finding:
+  response_priority: [183, 200]
+  enable_hop_fallback: false
+  enable_adjacent_packet_search: true
+
+
+# Media Extraction Configuration
+# --------------------------------------------------
+# Defines HOW to extract RTP endpoints from SDP
+media_extraction:
+  mode: sdp_from_responses
+  extract_from:
+    - message_type: response
+      response_codes: [183, 200]
+      extract: [carrier_rtp, rtpengine_rtp]
+
+
+# Topology Configuration
+# --------------------------------------------------
+# Defines the call topology structure
+topology:
+  legs: 2
+  description: "2-leg single Call-ID - Carrier ↔ RTP Engine"
+  phases:
+    - phase: 1
+      name: "Carrier ↔ RTP Engine"
+      legs:
+        - leg: 1
+          name: "Carrier → RTP Engine"
+          direction: carrier_to_rtpengine
+        - leg: 2
+          name: "RTP Engine → Carrier"
+          direction: rtpengine_to_carrier
+
+rtp_engine_detection:
+  enabled: false
+  use_resolved_ip: true
+
+# Re-INVITE Handling
+# --------------------------------------------------
+reinvite_filtering:
+  enabled: true
+
+validation:
+  required_ips:
+    - carrier
+  required_rtp_endpoints:
+    - carrier_rtp
+    - rtpengine_rtp

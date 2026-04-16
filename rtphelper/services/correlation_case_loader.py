@@ -113,14 +113,18 @@ class CorrelationCaseLoader:
         
         Args:
             cases_dir: Directory containing YAML case definitions.
-                       Defaults to rtphelper/correlation_cases/
+                       If not provided, loads from rtphelper/use_cases/
+                       with fallback to rtphelper/correlation_cases/.
         """
         if cases_dir is None:
-            # Default to correlation_cases directory next to this module
             module_dir = Path(__file__).parent.parent
-            cases_dir = module_dir / "correlation_cases"
-        
-        self.cases_dir = Path(cases_dir)
+            self.cases_dirs = [
+                module_dir / "use_cases",
+                module_dir / "correlation_cases",
+            ]
+        else:
+            self.cases_dirs = [Path(cases_dir)]
+
         self.cases: List[CorrelationCase] = []
         self._loaded = False
     
@@ -135,28 +139,43 @@ class CorrelationCaseLoader:
             LOGGER.error("PyYAML not installed - cannot load correlation cases")
             return []
         
-        if not self.cases_dir.exists():
-            LOGGER.warning(f"Correlation cases directory not found: {self.cases_dir}")
+        cases_by_name: Dict[str, CorrelationCase] = {}
+
+        for cases_dir in self.cases_dirs:
+            if not cases_dir.exists():
+                LOGGER.debug(f"Correlation cases directory not found: {cases_dir}")
+                continue
+
+            yaml_files = sorted(cases_dir.glob("*.yaml")) + sorted(cases_dir.glob("*.yml"))
+            for yaml_file in yaml_files:
+                try:
+                    case = self._load_case_file(yaml_file)
+                    if case and case.enabled:
+                        if case.name in cases_by_name:
+                            LOGGER.info(
+                                "Skipping duplicate use case '%s' from %s (already loaded from %s)",
+                                case.name,
+                                yaml_file,
+                                cases_by_name[case.name].file_path,
+                            )
+                            continue
+                        cases_by_name[case.name] = case
+                        LOGGER.debug(f"Loaded correlation case: {case.name} (priority={case.priority})")
+                except Exception as e:
+                    LOGGER.error(f"Failed to load correlation case from {yaml_file}: {e}")
+
+        if not cases_by_name:
+            LOGGER.warning(f"No correlation cases found in directories: {self.cases_dirs}")
             return []
-        
-        cases = []
-        yaml_files = sorted(self.cases_dir.glob("*.yaml")) + sorted(self.cases_dir.glob("*.yml"))
-        
-        for yaml_file in yaml_files:
-            try:
-                case = self._load_case_file(yaml_file)
-                if case and case.enabled:
-                    cases.append(case)
-                    LOGGER.debug(f"Loaded correlation case: {case.name} (priority={case.priority})")
-            except Exception as e:
-                LOGGER.error(f"Failed to load correlation case from {yaml_file}: {e}")
+
+        cases = list(cases_by_name.values())
         
         # Sort by priority (descending)
         cases.sort(key=lambda c: c.priority, reverse=True)
         
         self.cases = cases
         self._loaded = True
-        LOGGER.info(f"Loaded {len(cases)} correlation cases from {self.cases_dir}")
+        LOGGER.info(f"Loaded {len(cases)} correlation cases from {self.cases_dirs}")
         
         return cases
     
@@ -217,7 +236,7 @@ class CorrelationCaseLoader:
         correlation = CorrelationConfig(
             strategy=correlation_data.get("strategy", "generic"),
             force_direction=correlation_data.get("force_direction"),
-            multi_call_id=correlation_data.get("multi_call_id"),  # NEW: Simple boolean format
+            multi_call_id=correlation_data.get("multi_call_id", detection_data.get("multi_call_id")),
             annotations=correlation_data.get("annotations", []),
             notes=correlation_data.get("notes", ""),
             config=behavior_config
@@ -243,9 +262,10 @@ class CorrelationCaseLoader:
                     ))
             
             filters_config = FiltersConfig(
-                template_set=filters_data.get("template_set"),
+                template_set=filters_data.get("template_set") or filters_data.get("template"),
                 use_default_templates=filters_data.get("use_default_templates", True),
-                custom_templates_enabled=filters_data.get("custom_templates", {}).get("enabled", False),
+                custom_templates_enabled=filters_data.get("custom_templates", {}).get("enabled", False)
+                or filters_data.get("custom_templates_enabled", False),
                 steps=custom_steps
             )
         

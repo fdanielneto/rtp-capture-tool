@@ -1,0 +1,15 @@
+# Caso outbound single Call-ID (2 legs, sem XCC)
+name: outbound_single_hop
+enabled: true
+priority: 70
+
+detection:
+  direction: outbound
+  multi_call_id: false
+
+correlation:
+  strategy: outbound_single_hop
+  force_direction: outbound
+
+filters:
+  template: outbound_single_hop

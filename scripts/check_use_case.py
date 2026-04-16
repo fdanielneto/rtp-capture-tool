@@ -12,6 +12,7 @@ Example:
 
 import sys
 import argparse
+import base64
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -20,7 +21,7 @@ import yaml
 # Add rtphelper to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from rtphelper.services.sip_parser import parse_sip_pcap
+from rtphelper.services.sip_parser import parse_sip_pcap, SipMessage, SipCall, SdesCryptoMaterial
 from rtphelper.services.sip_correlation import (
     identify_use_case,
     group_related_calls,
@@ -180,6 +181,110 @@ def _get_nested_value(data: Dict[str, Any], field_path: str) -> Any:
     return value
 
 
+def _message_by_packet(call: SipCall, packet_number: int) -> Optional[SipMessage]:
+    """Find SIP message by packet number."""
+    for msg in call.messages:
+        if msg.packet_number == packet_number:
+            return msg
+    return None
+
+
+def _collect_sdes_materials(msg: SipMessage) -> List[SdesCryptoMaterial]:
+    """Collect SDES crypto materials from SIP message."""
+    out: List[SdesCryptoMaterial] = []
+    for section in msg.media_sections:
+        for c in section.sdes_cryptos:
+            out.append(c)
+    return out
+
+
+def _inline_from_material(material: SdesCryptoMaterial) -> str:
+    """Convert crypto material to base64 inline string."""
+    raw = material.master_key + material.master_salt
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _get_audio_protocol(msg: SipMessage) -> Optional[str]:
+    """Extract audio protocol (e.g., RTP/AVP, RTP/SAVP) from first audio media section."""
+    for section in msg.media_sections:
+        if section.media_type == 'audio' and section.protocol:
+            return section.protocol
+    return None
+
+
+def _extract_cipher_per_leg(
+    call: SipCall,
+    carrier_invite_packet: Optional[int],
+    carrier_200ok_packet: Optional[int],
+    core_invite_packet: Optional[int],
+    core_200ok_packet: Optional[int],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Extract cipher values per leg from SIP messages.
+    
+    Returns dict mapping leg name to {suite, inline, packet_number, source}.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    
+    # Carrier INVITE -> carrier_to_rtpengine cipher
+    if carrier_invite_packet is not None:
+        msg = _message_by_packet(call, carrier_invite_packet)
+        if msg:
+            cryptos = _collect_sdes_materials(msg)
+            if cryptos:
+                m = cryptos[0]
+                result["carrier_to_rtpengine"] = {
+                    "suite": m.suite,
+                    "inline": _inline_from_material(m),
+                    "packet_number": carrier_invite_packet,
+                    "source": "Carrier INVITE",
+                }
+    
+    # Carrier 200 OK -> rtpengine_to_carrier cipher
+    if carrier_200ok_packet is not None:
+        msg = _message_by_packet(call, carrier_200ok_packet)
+        if msg:
+            cryptos = _collect_sdes_materials(msg)
+            if cryptos:
+                m = cryptos[0]
+                result["rtpengine_to_carrier"] = {
+                    "suite": m.suite,
+                    "inline": _inline_from_material(m),
+                    "packet_number": carrier_200ok_packet,
+                    "source": "Carrier 200 OK",
+                }
+    
+    # Core INVITE -> rtpengine_to_core cipher (multi-topology only)
+    if core_invite_packet is not None:
+        msg = _message_by_packet(call, core_invite_packet)
+        if msg:
+            cryptos = _collect_sdes_materials(msg)
+            if cryptos:
+                m = cryptos[0]
+                result["rtpengine_to_core"] = {
+                    "suite": m.suite,
+                    "inline": _inline_from_material(m),
+                    "packet_number": core_invite_packet,
+                    "source": "Core INVITE",
+                }
+    
+    # Core 200 OK -> core_to_rtpengine cipher (multi-topology only)
+    if core_200ok_packet is not None:
+        msg = _message_by_packet(call, core_200ok_packet)
+        if msg:
+            cryptos = _collect_sdes_materials(msg)
+            if cryptos:
+                m = cryptos[0]
+                result["core_to_rtpengine"] = {
+                    "suite": m.suite,
+                    "inline": _inline_from_material(m),
+                    "packet_number": core_200ok_packet,
+                    "source": "Core 200 OK",
+                }
+    
+    return result
+
+
 def _set_nested_value(data: Dict[str, Any], field_path: str, value: Any) -> None:
     """Set nested value in dict using dot notation."""
     parts = field_path.split(".")
@@ -207,9 +312,10 @@ def _enrich_template_variables(variables: Dict[str, Any]) -> Dict[str, Any]:
             _set_nested_value(variables, "rtpengine.public_ip", public_ip)
             _set_nested_value(variables, "rtpengine.sdp_ip", public_ip)
 
-    # Some templates use rtpengine.source.port (non-canonical alias).
+    # Some templates use rtpengine.source.port alias.
     source_port = (
-        _get_nested_value(variables, "core.source.port")
+        _get_nested_value(variables, "core.destination.port")
+        or _get_nested_value(variables, "core.source.port")
         or _get_nested_value(variables, "carrier.destination.port")
         or _get_nested_value(variables, "carrier.source.port")
     )
@@ -495,6 +601,136 @@ def analyze_pcap(pcap_path: str, direction: Optional[str] = None) -> None:
                                 continue
                         reason = str(step.get("reason") or "not available")
                         print(f"{leg_label}: <unavailable: {reason}>")
+
+            # Show cipher values per leg
+            print()
+            print("🔐 Cipher values per leg (SDES):")
+            try:
+                # Get packet numbers from LegInfo objects if available
+                carrier_invite_pkt = ctx.carrier_leg.invite_packet if ctx.carrier_leg else None
+                carrier_200ok_pkt = ctx.carrier_leg.ok_200_packet if ctx.carrier_leg else None
+                core_invite_pkt = ctx.core_leg.invite_packet if ctx.core_leg else None
+                core_200ok_pkt = ctx.core_leg.ok_200_packet if ctx.core_leg else None
+                
+                # Fallback: find INVITE and 200 OK (to INVITE) packets directly from SIP messages
+                # Logic for B2BUA/RTP Engine scenarios:
+                # - Carrier INVITE: first INVITE (no to_tag) from carrier
+                # - Carrier 200 OK: 200 OK (CSeq INVITE) responding to carrier INVITE 
+                # - Core INVITE: INVITE to the LAST host (final destination)
+                # - Core 200 OK: 200 OK from the last host
+                
+                if carrier_invite_pkt is None or carrier_200ok_pkt is None or core_invite_pkt is None or core_200ok_pkt is None:
+                    # Collect ALL INVITEs and 200 OKs (to INVITE)
+                    all_invites: List[SipMessage] = []
+                    invite_200oks: List[SipMessage] = []
+                    
+                    for msg in merged_call.messages:
+                        if msg.is_request and msg.method == "INVITE":
+                            all_invites.append(msg)
+                        elif not msg.is_request and msg.status_code == 200 and msg.cseq_method == "INVITE":
+                            invite_200oks.append(msg)
+                    
+                    # Sort by packet number
+                    all_invites.sort(key=lambda m: m.packet_number)
+                    invite_200oks.sort(key=lambda m: m.packet_number)
+                    
+                    # Deduplicate INVITEs by src_ip+dst_ip (keep first occurrence)
+                    unique_invites: List[SipMessage] = []
+                    seen_pairs: set = set()
+                    for inv in all_invites:
+                        pair = (inv.src_ip, inv.dst_ip)
+                        if pair not in seen_pairs:
+                            seen_pairs.add(pair)
+                            unique_invites.append(inv)
+                    
+                    # Deduplicate 200 OKs by src_ip (keep first occurrence)
+                    unique_200oks: List[SipMessage] = []
+                    seen_200ok_srcs: set = set()
+                    for ok in invite_200oks:
+                        if ok.src_ip not in seen_200ok_srcs:
+                            seen_200ok_srcs.add(ok.src_ip)
+                            unique_200oks.append(ok)
+                    
+                    # First unique INVITE = Carrier INVITE
+                    if unique_invites and carrier_invite_pkt is None:
+                        carrier_invite_pkt = unique_invites[0].packet_number
+                        carrier_invite_msg = unique_invites[0]
+                        
+                        # Find corresponding 200 OK (from the dst of INVITE)
+                        if carrier_200ok_pkt is None:
+                            for ok in invite_200oks:
+                                if ok.src_ip == carrier_invite_msg.dst_ip:
+                                    carrier_200ok_pkt = ok.packet_number
+                                    break
+                    
+                    # For multi-host scenarios: find the LAST host
+                    # Last host = sends a 200 OK but is NOT the carrier's dst
+                    if len(unique_200oks) >= 2 and core_200ok_pkt is None:
+                        carrier_dst = unique_invites[0].dst_ip if unique_invites else None
+                        
+                        # Find 200 OK from a host that is NOT the carrier's direct dst
+                        for ok in unique_200oks:
+                            if ok.src_ip != carrier_dst:
+                                core_200ok_pkt = ok.packet_number
+                                last_host_ip = ok.src_ip
+                                
+                                # Core INVITE = INVITE whose dst_ip matches this last host
+                                if core_invite_pkt is None:
+                                    for invite in unique_invites:
+                                        if invite.dst_ip == last_host_ip:
+                                            core_invite_pkt = invite.packet_number
+                                            break
+                                break
+                
+                cipher_per_leg = _extract_cipher_per_leg(
+                    call=merged_call,
+                    carrier_invite_packet=carrier_invite_pkt,
+                    carrier_200ok_packet=carrier_200ok_pkt,
+                    core_invite_packet=core_invite_pkt,
+                    core_200ok_packet=core_200ok_pkt,
+                )
+                
+                # Display cipher values per leg
+                # For legs with cipher: show full cipher info
+                # For legs without cipher (RTP/AVP): show protocol indication
+                leg_packets = {
+                    "carrier_to_rtpengine": carrier_invite_pkt,
+                    "rtpengine_to_carrier": carrier_200ok_pkt,
+                    "rtpengine_to_core": core_invite_pkt,
+                    "core_to_rtpengine": core_200ok_pkt,
+                }
+                leg_sources = {
+                    "carrier_to_rtpengine": "Carrier INVITE",
+                    "rtpengine_to_carrier": "Carrier 200 OK",
+                    "rtpengine_to_core": "Core INVITE",
+                    "core_to_rtpengine": "Core 200 OK",
+                }
+                
+                has_any_output = False
+                for leg_name in ["carrier_to_rtpengine", "rtpengine_to_carrier", "rtpengine_to_core", "core_to_rtpengine"]:
+                    cipher_info = cipher_per_leg.get(leg_name) if cipher_per_leg else None
+                    pkt_num = leg_packets.get(leg_name)
+                    
+                    if cipher_info:
+                        has_any_output = True
+                        print(f"   {leg_name}:")
+                        print(f"      Source: {cipher_info['source']} (packet {cipher_info['packet_number']})")
+                        print(f"      Suite: {cipher_info['suite']}")
+                        print(f"      Inline: {cipher_info['inline']}")
+                    elif pkt_num:
+                        # Check if this message exists and what protocol it uses
+                        msg = _message_by_packet(merged_call, pkt_num)
+                        if msg:
+                            proto = _get_audio_protocol(msg) or "unknown"
+                            has_any_output = True
+                            print(f"   {leg_name}:")
+                            print(f"      Source: {leg_sources[leg_name]} (packet {pkt_num})")
+                            print(f"      Protocol: {proto} (no SDES cipher)")
+                
+                if not has_any_output:
+                    print("   <no SDES crypto materials found>")
+            except Exception as cipher_exc:
+                print(f"   ⚠️  Could not extract cipher values: {cipher_exc}")
         except Exception as filter_exc:
             print(f"⚠️  Could not build filters for selected use case: {filter_exc}")
     else:

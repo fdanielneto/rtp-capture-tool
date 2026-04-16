@@ -1,0 +1,15 @@
+# Caso inbound single Call-ID (2 legs, sem XCC)
+name: inbound_single_hop
+enabled: true
+priority: 70
+
+detection:
+  direction: inbound
+  multi_call_id: false
+
+correlation:
+  strategy: inbound_single_hop
+  force_direction: inbound
+
+filters:
+  template: inbound_single_hop

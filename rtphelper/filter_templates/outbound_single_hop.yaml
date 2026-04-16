@@ -1,0 +1,19 @@
+name: outbound_single_hop
+legs: 2
+
+steps:
+  - step: 1
+    leg_key: leg_rtpengine_carrier
+    phase1_template: ip.src==${core.source.ip} && udp.srcport==${core.source.port}
+    phase2_template: ip.src==${rtpengine.resolved_ip} && udp.srcport==${core.source.port}
+    required_fields:
+      - core.source.ip
+      - core.source.port
+
+  - step: 2
+    leg_key: leg_carrier_rtpengine
+    phase1_template: ip.src==${carrier.destination.ip} && udp.srcport==${carrier.destination.port}
+    phase2_template: ip.src==${carrier.destination.ip} && udp.srcport==${carrier.destination.port}
+    required_fields:
+      - carrier.destination.ip
+      - carrier.destination.port

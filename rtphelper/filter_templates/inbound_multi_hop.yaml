@@ -1,0 +1,37 @@
+name: inbound_multi_hop
+legs: 4
+
+steps:
+  - step: 1
+    leg_key: leg_carrier_rtpengine
+    phase1_template: ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+    phase2_template: ip.src==${carrier.source.ip} && udp.srcport==${carrier.source.port}
+    required_fields:
+      - carrier.source.ip
+      - carrier.source.port
+
+  - step: 2
+    leg_key: leg_rtpengine_carrier
+    phase1_template: ip.dst==${carrier.source.ip} && udp.srcport==${carrier.destination.port}
+    phase2_template: ip.src==${rtpengine.resolved_ip} && udp.srcport==${carrier.destination.port}
+    required_fields:
+      - carrier.source.ip
+      - carrier.destination.port
+      - rtpengine.resolved_ip
+
+  - step: 3
+    leg_key: leg_rtpengine_core
+    phase1_template: ip.dst==${core.destination.ip} && udp.srcport==${core.source.port}
+    phase2_template: ip.src==${rtpengine.resolved_ip} && udp.srcport==${core.source.port}
+    required_fields:
+      - core.destination.ip
+      - core.source.port
+      - rtpengine.resolved_ip
+
+  - step: 4
+    leg_key: leg_core_rtpengine
+    phase1_template: ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}
+    phase2_template: ip.src==${core.destination.ip} && udp.srcport==${core.destination.port}
+    required_fields:
+      - core.destination.ip
+      - core.destination.port

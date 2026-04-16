@@ -2514,13 +2514,24 @@ async def correlate(
         crypto_to_use: List[SdesCryptoMaterial] = []
 
         if leg_is_savp:
+            # Leg-to-material binding:
+            # - Single topology (2 materials): carrier_to_rtpengine=0, rtpengine_to_carrier=1
+            # - Multiple topology (4 materials): carrier legs=0/1, core legs=2/3
             crypto_idx = leg_to_crypto_index.get(leg_label)
-            if selected_crypto and len(selected_crypto) == 4 and crypto_idx is not None and crypto_idx < len(selected_crypto):
-                leg_specific_crypto = [selected_crypto[crypto_idx]]
-                crypto_to_use = leg_specific_crypto
-                key_status = "present"
-                key_suite = selected_crypto[crypto_idx].suite
+            
+            if selected_crypto and crypto_idx is not None:
+                # For single topology, only indices 0/1 are valid (carrier legs)
+                # For multiple topology, all indices 0-3 are valid
+                if crypto_idx < len(selected_crypto):
+                    leg_specific_crypto = [selected_crypto[crypto_idx]]
+                    crypto_to_use = leg_specific_crypto
+                    key_status = "present"
+                    key_suite = selected_crypto[crypto_idx].suite
+                else:
+                    # Index out of bounds - this leg has no specific material
+                    key_status = "missing"
             elif selected_crypto:
+                # Fallback: pass all materials (should not happen with proper binding)
                 crypto_to_use = list(selected_crypto)
                 key_status = "present"
                 key_suite = ",".join(sorted({m.suite for m in selected_crypto}))
