@@ -256,9 +256,9 @@ def index(request: Request) -> HTMLResponse:
             detail="No environments configured. Please verify config/hosts.yaml",
         )
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "environments": configured_environments,
             "log_level": os.environ.get("RTPHELPER_LOG_LEVEL", "INFO").upper(),
             "capture_root": str(CAPTURE_ROOT),
