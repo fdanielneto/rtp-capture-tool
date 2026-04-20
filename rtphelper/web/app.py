@@ -2479,12 +2479,18 @@ async def correlate(
     decrypted_files: List[Path] = []
     no_decrypt_files: List[Path] = []
     
-    # Map leg labels to crypto material indices and encryption status
+    # Map leg labels to crypto material indices and encryption status.
+    # all_materials is built by _select_all_legs_crypto as:
+    #   [0] = carrier INVITE crypto  → key offered by the INVITE sender (RTP Engine) → rtpengine_to_carrier
+    #   [1] = carrier 200 OK crypto  → key offered by the 200 OK sender (carrier)    → carrier_to_rtpengine
+    #   [2] = core INVITE crypto     → key offered by the INVITE sender (core)        → core_to_rtpengine
+    #   [3] = core 200 OK crypto     → key offered by the 200 OK sender (RTP Engine)  → rtpengine_to_core
+    # Per RFC 4568 each SDP party offers the master key for the stream it *sends*.
     leg_to_crypto_index = {
-        "carrier_to_rtpengine": 0,
-        "rtpengine_to_carrier": 1,
-        "rtpengine_to_core": 2,
-        "core_to_rtpengine": 3,
+        "carrier_to_rtpengine": 1,
+        "rtpengine_to_carrier": 0,
+        "rtpengine_to_core": 3,
+        "core_to_rtpengine": 2,
     }
 
     leg_expected_media_security: Dict[str, str] = {
