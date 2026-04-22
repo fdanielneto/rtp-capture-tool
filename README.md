@@ -393,13 +393,10 @@ Follow existing code style and add tests for new features.
 
 ## Support
 
-For issues, questions, or feature requests:
-- Check `logs/app.log` first
-- Review [CORRELATION_GUIDE.md](docs/CORRELATION_GUIDE.md) for correlation troubleshooting
-- Run `scripts/rpcap_diagnose.py` for capture connectivity issues
+Update to the last version
+- git pull origin main
 
----
+Run Tool
+- make start
 
-**Version:** 1.0  
-**Last Updated:** March 5, 2026
 
