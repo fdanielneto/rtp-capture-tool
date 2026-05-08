@@ -774,6 +774,7 @@ class ConfigurableCorrelator(CorrelationStrategy):
             return None
         
         leg.invite = invite
+        leg.invite_packet = invite.packet_number
         leg.source_ip = invite.src_ip
         leg.destination_ip = invite.dst_ip
         
@@ -845,12 +846,27 @@ class ConfigurableCorrelator(CorrelationStrategy):
         
         if enable_hop_fallback:
             ctx.log_lines.append("INFO: Attempting hop-based fallback for response")
-            # This would need more complex logic - for now just log
-        
+            # Look for responses received by the next hop (invite.dst_ip).
+            # xcc_ip=None bypasses the XCC block intentionally: for the core leg in
+            # outbound multi-hop, the XCC is invite.dst_ip and we specifically want
+            # the responses that the XCC received from the carrier (e.g. 183/200 OK
+            # in packets 13/14 or 17/18) to use as proxy SDP when the direct
+            # XCC→Core response is absent from the capture.
+            fallback = _find_response_to_hop(call, invite.dst_ip, invite.ts, xcc_ip=None)
+            if fallback:
+                label = "183 Session Progress" if fallback.status_code == 183 else "200 OK"
+                ctx.log_lines.append(
+                    f"INFO: Hop-based fallback: using {label} received by hop "
+                    f"{invite.dst_ip} packet={fallback.packet_number}"
+                )
+                return fallback
+            ctx.log_lines.append(
+                f"WARN: Hop-based fallback found no response for next-hop {invite.dst_ip}"
+            )
+
         if enable_adjacent_packet_search:
-            ctx.log_lines.append("INFO: Adjacent packet search enabled")
-            # This would need more complex logic - for now just log
-        
+            ctx.log_lines.append("INFO: Adjacent packet search enabled (no base response to search adjacently)")
+
         return None
 
 

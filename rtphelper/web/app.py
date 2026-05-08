@@ -2479,13 +2479,33 @@ async def correlate(
     decrypted_files: List[Path] = []
     no_decrypt_files: List[Path] = []
     
-    # Map leg labels to crypto material indices and encryption status
-    leg_to_crypto_index = {
-        "carrier_to_rtpengine": 0,
-        "rtpengine_to_carrier": 1,
-        "rtpengine_to_core": 2,
-        "core_to_rtpengine": 3,
-    }
+    # leg_to_crypto_index maps each traffic leg to the index in all_materials that holds
+    # the key for that leg's sender. RFC 4568: each SDP party offers the key for what it sends.
+    # all_materials = [carrier_invite, carrier_ok, core_invite, core_ok]
+    #
+    # OUTBOUND: carrier INVITE sent by RTP Engine (index 0) → rtpengine_to_carrier
+    #           carrier 200 OK sent by carrier   (index 1) → carrier_to_rtpengine
+    #           core INVITE sent by core          (index 2) → core_to_rtpengine
+    #           core 200 OK sent by RTP Engine    (index 3) → rtpengine_to_core
+    #
+    # INBOUND:  carrier INVITE sent by carrier    (index 0) → carrier_to_rtpengine
+    #           carrier 200 OK sent by RTP Engine (index 1) → rtpengine_to_carrier
+    #           core INVITE sent by RTP Engine    (index 2) → rtpengine_to_core
+    #           core 200 OK sent by core          (index 3) → core_to_rtpengine
+    if direction == "outbound":
+        leg_to_crypto_index = {
+            "carrier_to_rtpengine": 1,
+            "rtpengine_to_carrier": 0,
+            "rtpengine_to_core": 3,
+            "core_to_rtpengine": 2,
+        }
+    else:  # inbound
+        leg_to_crypto_index = {
+            "carrier_to_rtpengine": 0,
+            "rtpengine_to_carrier": 1,
+            "rtpengine_to_core": 2,
+            "core_to_rtpengine": 3,
+        }
 
     leg_expected_media_security: Dict[str, str] = {
         "carrier_to_rtpengine": "RTP/SAVP" if leg_encryption_status.get("carrier_to_rtpengine", encrypted_expected) else "RTP/AVP",
@@ -3100,6 +3120,14 @@ def _select_core_request_reply_messages(call: SipCall, negotiation: Dict[str, An
         raise ValueError("Direction must be Inbound or Outbound")
 
     ok = _match_200_ok_for_invite(call, invite)
+    if ok is None:
+        # Fallback: the direct XCC→Core response may be absent from the capture.
+        # Look for responses received by the next hop (invite.dst_ip, i.e. the XCC)
+        # — e.g. 183/200 sent by the carrier to the XCC — and use that SDP as proxy.
+        # xcc_ip=None bypasses the XCC-block in _find_response_to_hop so the XCC
+        # itself can be the hop whose received responses we inspect.
+        from rtphelper.services.sip_correlation import _find_response_to_hop
+        ok = _find_response_to_hop(call, invite.dst_ip, invite.ts, xcc_ip=None)
     if ok is None:
         raise ValueError("Could not find 200 OK for host-core INVITE")
     if _first_audio_port(ok) is None:
