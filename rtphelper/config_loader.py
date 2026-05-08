@@ -12,15 +12,18 @@ LOGGER = logging.getLogger(__name__)
 class RpcapConfig(BaseModel):
     default_port: int = 2002
     auth_mode: str = "null"
+    # Username for password authentication. Password is never stored here —
+    # supply it via the RTPHELPER_RPCAP_PASSWORD environment variable.
+    username: str = ""
 
     @field_validator("auth_mode", mode="before")
     @classmethod
     def validate_auth_mode(cls, value: object) -> str:
         if value is None:
             return "null"
-        if value != "null":
-            raise ValueError("Only null authentication is supported")
-        return "null"
+        if value not in ("null", "password"):
+            raise ValueError("auth_mode must be 'null' or 'password'")
+        return str(value)
 
 
 class AppSettings(BaseModel):

@@ -1550,7 +1550,7 @@ class CaptureService:
             # We'll open linktype from the first interface; assume same DLT across host interfaces.
             client = RpcapClient(host.address, port=host.port or self._config.rpcap.default_port)
             client.connect()
-            client.auth_null()
+            self._do_rpcap_auth(client)
             open_info = client.open(host.interfaces[0])
             client.close()
 
@@ -1902,11 +1902,48 @@ class CaptureService:
         )
         session.stop_event.set()
 
+    def _do_rpcap_auth(self, client: RpcapClient) -> None:
+        """
+        Authenticate against rpcapd using the mode configured in hosts.yaml
+        (rpcap.auth_mode) with optional env-var overrides.
+
+        Resolution order (highest priority first):
+          1. RTPHELPER_RPCAP_AUTH_MODE  env var
+          2. hosts.yaml  rpcap.auth_mode          (default: "null")
+          3. RTPHELPER_RPCAP_USERNAME   env var
+          4. hosts.yaml  rpcap.username            (default: "")
+          5. RTPHELPER_RPCAP_PASSWORD   env var    (never stored in yaml)
+
+        Modes:
+          "null"     — no authentication (rpcapd default, existing behaviour)
+          "password" — username/password (RPCAP_AUTH_PWD)
+        """
+        auth_mode = (
+            os.environ.get("RTPHELPER_RPCAP_AUTH_MODE", "").strip()
+            or self._config.rpcap.auth_mode
+        )
+        if auth_mode == "null":
+            client.auth_null()
+        elif auth_mode == "password":
+            username = (
+                os.environ.get("RTPHELPER_RPCAP_USERNAME", "").strip()
+                or self._config.rpcap.username
+            )
+            password = os.environ.get("RTPHELPER_RPCAP_PASSWORD", "").strip()
+            if not username or not password:
+                raise RuntimeError(
+                    "RPCAP auth_mode=password requires RTPHELPER_RPCAP_USERNAME "
+                    "and RTPHELPER_RPCAP_PASSWORD to be set"
+                )
+            client.auth_pwd(username, password)
+        else:
+            raise RuntimeError(f"Unsupported RPCAP auth_mode: {auth_mode!r}")
+
     def _preflight_rpcap(self, host: HostConfig, iface: str) -> None:
         client = RpcapClient(host.address, port=host.port or self._config.rpcap.default_port)
         client.connect()
         try:
-            client.auth_null()
+            self._do_rpcap_auth(client)
             client.open(iface)
         finally:
             client.close()
@@ -1928,7 +1965,7 @@ class CaptureService:
             extra={"category": "CAPTURE", "correlation_id": session.session_id},
         )
         client.connect()
-        client.auth_null()
+        self._do_rpcap_auth(client)
         client.open(iface)
         # Many rpcapd implementations expect the filter to be included in STARTCAP.
         client.start_capture(
