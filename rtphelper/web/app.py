@@ -3121,6 +3121,14 @@ def _select_core_request_reply_messages(call: SipCall, negotiation: Dict[str, An
 
     ok = _match_200_ok_for_invite(call, invite)
     if ok is None:
+        # Fallback: the direct XCC→Core response may be absent from the capture.
+        # Look for responses received by the next hop (invite.dst_ip, i.e. the XCC)
+        # — e.g. 183/200 sent by the carrier to the XCC — and use that SDP as proxy.
+        # xcc_ip=None bypasses the XCC-block in _find_response_to_hop so the XCC
+        # itself can be the hop whose received responses we inspect.
+        from rtphelper.services.sip_correlation import _find_response_to_hop
+        ok = _find_response_to_hop(call, invite.dst_ip, invite.ts, xcc_ip=None)
+    if ok is None:
         raise ValueError("Could not find 200 OK for host-core INVITE")
     if _first_audio_port(ok) is None:
         next_ok = _next_200ok_same_route_with_audio(call, ok)
