@@ -30,6 +30,7 @@ RPCAP_MSG_ENDCAP_REPLY = 10 + 128
 RPCAP_ERR_AUTH_FAILED = 4
 
 RPCAP_AUTH_NULL = 0
+RPCAP_AUTH_PWD = 1
 
 RPCAP_UPDATEFILTER_BPF = 1
 
@@ -65,6 +66,15 @@ def pack_auth_null() -> bytes:
     # struct rpcap_auth:
     # uint16 type; uint16 dummy; uint16 slen1; uint16 slen2;
     return struct.pack("!HHHH", RPCAP_AUTH_NULL, 0, 0, 0)
+
+
+def pack_auth_pwd(username: str, password: str) -> bytes:
+    # struct rpcap_auth:
+    # uint16 type=1; uint16 dummy=0; uint16 slen1=len(username); uint16 slen2=len(password);
+    # followed by username bytes (no NUL) + password bytes (no NUL)
+    user_b = username.encode("utf-8")
+    pass_b = password.encode("utf-8")
+    return struct.pack("!HHHH", RPCAP_AUTH_PWD, 0, len(user_b), len(pass_b)) + user_b + pass_b
 
 
 def pack_open_req(device: str) -> bytes:

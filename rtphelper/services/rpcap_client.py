@@ -25,6 +25,7 @@ from rtphelper.rpcap.protocol import (
     RPCAP_UPDATEFILTER_BPF,
     RPCAP_STARTCAPREQ_FLAG_PROMISC,
     pack_auth_null,
+    pack_auth_pwd,
     pack_bpf_program,
     pack_header,
     pack_open_req,
@@ -82,6 +83,16 @@ class RpcapClient:
     def auth_null(self) -> None:
         self._ensure_connected()
         self._send(RPCAP_MSG_AUTH_REQ, 0, pack_auth_null())
+        msg_type, value, payload = self._recv_msg()
+        if msg_type == RPCAP_MSG_ERROR:
+            raise RuntimeError(self._format_error("RPCAP auth failed", value, payload))
+        if msg_type != RPCAP_MSG_AUTH_REPLY:
+            raise RuntimeError(f"Unexpected RPCAP message during auth: {msg_type}")
+
+    def auth_pwd(self, username: str, password: str) -> None:
+        """Authenticate with username/password (RPCAP_AUTH_PWD = 1)."""
+        self._ensure_connected()
+        self._send(RPCAP_MSG_AUTH_REQ, 0, pack_auth_pwd(username, password))
         msg_type, value, payload = self._recv_msg()
         if msg_type == RPCAP_MSG_ERROR:
             raise RuntimeError(self._format_error("RPCAP auth failed", value, payload))

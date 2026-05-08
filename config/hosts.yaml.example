@@ -1,6 +1,13 @@
 rpcap:
   default_port: 2002
+  # auth_mode controls how the tool authenticates against rpcapd.
+  # Supported values:
+  #   null     - no authentication (rpcapd default, recommended for trusted networks)
+  #   password - username/password authentication (RPCAP_AUTH_PWD)
   auth_mode: null
+  # username is only used when auth_mode=password.
+  # The password is NEVER stored here; supply it via RTPHELPER_RPCAP_PASSWORD.
+  # username: ""
 
 settings:
   default_capture_root: /absolute/path/for/captures
